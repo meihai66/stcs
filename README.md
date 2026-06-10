@@ -3,7 +3,7 @@
 对接 **OpenAI 兼容中转站** 的生图工具 + 中转站压测台。**Go 后端 + React(Vite + Tailwind)前端**,
 单二进制部署、前端嵌入二进制、SQLite 无 CGO,镜像极小。进入测试页需输入访问密码。
 
-> 由原 Python 版(`GPT和Gemini生图带压测/`,保留作参考)用 Go 全量重写。
+> 由原 Python 版用 Go 全量重写。
 
 ## 功能
 

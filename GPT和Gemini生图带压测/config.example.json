@@ -1,9 +1,0 @@
-{
-  "base_url": "https://your-relay-station.com",
-  "api_key": "sk-xxxxxxxxxxxxxxxx",
-  "model": "gpt-image-2",
-  "default_size": "1024x1024",
-  "default_quality": "high",
-  "timeout": 300,
-  "server_api_key": ""
-}
