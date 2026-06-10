@@ -28,10 +28,16 @@ services:
       # STCS_MODEL: "gpt-image-2"
       # STCS_SERVER_API_KEY: ""   # 对外 /v1 API 的访问密钥,留空不校验
     volumes:
-      - ./data:/app/data
+      # 默认用命名卷,任何机器(含 snap 版 docker)都能正常持久化。
+      - stcs-data:/app/data
+      # 想直接在宿主看到/备份数据,改用绑定挂载(注意:snap 版 docker 只能挂 $HOME 下的目录,不能挂 /tmp 等):
+      # - ./data:/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5311/api/auth/status"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
+
+volumes:
+  stcs-data:

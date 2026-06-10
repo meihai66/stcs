@@ -20,10 +20,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /stcs .
 
 # ---------- 阶段 3:最小运行镜像 ----------
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
+RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=build /stcs /app/stcs
-USER app
+RUN mkdir -p /app/data
+# 以 root 运行,保证绑定挂载/命名卷的 /app/data 始终可写(自托管内网工具,够用)
 ENV STCS_DATA_DIR=/app/data \
     STCS_PORT=5311 \
     TZ=Asia/Shanghai
