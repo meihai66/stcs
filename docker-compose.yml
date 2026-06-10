@@ -1,0 +1,37 @@
+# STCS 生图压测台 —— 其他机器一键部署。
+#
+# 用法:
+#   1. 把本文件放到目标机器任意目录
+#   2. (可选)改下面的 STCS_PASSWORD 访问密码
+#   3. docker compose up -d
+#   4. 浏览器打开 http://<服务器IP>:5311 ,输入密码进入
+#
+# 配置(中转站地址/密钥/模型)登录后在「设置」里填,持久化到 ./data 卷;
+# 也可用下面注释的环境变量预置。
+services:
+  stcs:
+    image: meihai0211/stcs:latest
+    container_name: stcs
+    restart: unless-stopped
+    ports:
+      - "5311:5311"
+    environment:
+      # —— 访问密码门(必改!)——
+      STCS_PASSWORD: "admin888"
+      # —— 服务参数 ——
+      STCS_PORT: "5311"
+      STCS_DATA_DIR: "/app/data"
+      TZ: "Asia/Shanghai"
+      # —— 可选:预置中转站,免去网页里手填 ——
+      # STCS_BASE_URL: "https://api.example.com"
+      # STCS_API_KEY: "sk-xxxxxxxx"
+      # STCS_MODEL: "gpt-image-2"
+      # STCS_SERVER_API_KEY: ""   # 对外 /v1 API 的访问密钥,留空不校验
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5311/api/auth/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

@@ -1,0 +1,10 @@
+.git
+.gitignore
+GPT和Gemini生图带压测/
+web/node_modules
+web/dist
+data
+*.log
+README.md
+docker-compose*.yml
+scripts/

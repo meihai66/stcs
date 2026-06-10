@@ -1,0 +1,14 @@
+# 运行数据(含密钥的 config.json、SQLite、生成的图片)
+/data/
+
+# 编译产物
+/stcs
+/stcs.exe
+
+# 前端
+web/node_modules/
+web/dist/
+
+# 杂项
+*.log
+.DS_Store
