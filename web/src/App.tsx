@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { LogOut, Settings, ShoppingBag, Sparkles, Star, Zap } from 'lucide-react'
+import { Download, LogOut, Moon, Settings, ShoppingBag, Sparkles, Star, Sun, Zap } from 'lucide-react'
 import { api } from './api'
 import type { Config, HistoryItem, Mode, Profile, Task } from './types'
 import LoginGate from './components/LoginGate'
@@ -24,7 +24,15 @@ export default function App() {
 
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress'>('')
+  const [theme, setTheme] = useState<'dark' | 'light'>(
+    () => (localStorage.getItem('stcs-theme') === 'light' ? 'light' : 'dark'),
+  )
   const lastActive = useRef(0)
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', theme === 'light')
+    localStorage.setItem('stcs-theme', theme)
+  }, [theme])
 
   const loadConfig = useCallback(async () => {
     const cfg = await api.getConfig()
@@ -118,7 +126,7 @@ export default function App() {
             <Sparkles size={18} className="text-white" />
           </div>
           <div>
-            <h1 className="text-[15px] font-bold leading-none text-white">STCS 生图压测台</h1>
+            <h1 className="text-[15px] font-bold leading-none text-slate-100">STCS 生图压测台</h1>
             <span className="text-[11px] text-slate-500">{config.model || '未配置模型'}</span>
           </div>
         </div>
@@ -145,6 +153,13 @@ export default function App() {
           </button>
           <button className="btn btn-ghost" onClick={() => setModal('settings')}>
             <Settings size={15} /> 设置
+          </button>
+          <button
+            className="btn btn-ghost !px-2.5"
+            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            title={theme === 'light' ? '切换到深色主题' : '切换到浅色主题'}
+          >
+            {theme === 'light' ? <Moon size={15} /> : <Sun size={15} />}
           </button>
           <button className="btn btn-ghost !px-2.5" onClick={logout} title="退出登录">
             <LogOut size={15} />
@@ -193,7 +208,12 @@ export default function App() {
         onApply={(p, m) => { setPrompt(p); setMode(m) }}
         onLightbox={setLightbox}
       />
-      <StressModal open={modal === 'stress'} onClose={() => setModal('')} config={config} />
+      <StressModal
+        open={modal === 'stress'}
+        onClose={() => setModal('')}
+        config={config}
+        onLightbox={setLightbox}
+      />
 
       {/* 灯箱 */}
       {lightbox && (
@@ -201,7 +221,15 @@ export default function App() {
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-6"
           onClick={() => setLightbox(null)}
         >
-          <img src={lightbox} className="max-h-[92vh] max-w-[92vw] rounded-lg" />
+          <img src={lightbox} className="max-h-[88vh] max-w-[92vw] rounded-lg" />
+          <a
+            href={lightbox}
+            download={lightbox.split('/').pop() || 'image.png'}
+            className="btn btn-primary absolute bottom-6 left-1/2 -translate-x-1/2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Download size={15} /> 保存图片
+          </a>
         </div>
       )}
     </div>

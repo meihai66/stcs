@@ -28,7 +28,7 @@ export default function LoginGate({ onSuccess }: { onSuccess: () => void }) {
           <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-brand-500 to-fuchsia-500 shadow-xl shadow-indigo-500/30">
             <Sparkles className="text-white" size={30} />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">STCS 生图压测台</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-100">STCS 生图压测台</h1>
           <p className="mt-1.5 text-sm text-slate-400">GPT / Gemini 生图 · 中转站压测</p>
         </div>
         <form onSubmit={submit} className="glass rounded-2xl p-6 shadow-2xl">

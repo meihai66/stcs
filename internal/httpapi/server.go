@@ -422,6 +422,7 @@ func stressStart(w http.ResponseWriter, r *http.Request) {
 		Size          string `json:"size"`
 		Quality       string `json:"quality"`
 		RequestFormat string `json:"request_format"`
+		Save          bool   `json:"save"`
 	}
 	_ = decodeJSON(r, &body)
 	cfg := config.Load()
@@ -447,6 +448,7 @@ func stressStart(w http.ResponseWriter, r *http.Request) {
 		Size:        orStr(body.Size, "1024x1024"),
 		Quality:     orStr(body.Quality, cfg.DefaultQuality),
 		Fmt:         orStr(body.RequestFormat, cfg.RequestFormat),
+		Save:        body.Save,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "total": total, "concurrency": concurrency,

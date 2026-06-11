@@ -1,12 +1,14 @@
 // Package stress 实现生图压测:按自定义并发向中转站发起 N 次真实生图请求,
-// 统计成功率/延迟/吞吐。压测只测量、不保存图片。
+// 统计成功率/延迟/吞吐。可选保存生成的图片(默认开,最多保留 maxSavedImages 张)。
 //
 // Go 原生并发,直接用 goroutine 工作池实现,无 Python 版的 select 512 限制问题。
 package stress
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -15,7 +17,11 @@ import (
 
 	"github.com/meihai66/stcs/internal/config"
 	"github.com/meihai66/stcs/internal/generator"
+	"github.com/meihai66/stcs/internal/store"
 )
+
+// maxSavedImages 单轮压测最多落盘的图片数,防止把磁盘塞满。
+const maxSavedImages = 200
 
 type run struct {
 	mu          sync.Mutex
@@ -30,17 +36,21 @@ type run struct {
 	Fail        int
 	Latencies   []float64
 	Errors      map[string]int
+	Images      []store.Image
 	StartMono   time.Time
 	StartedAt   int64
 	Elapsed     float64
 	ErrMsg      string
+	saveImgs    bool
 	cancel      context.CancelFunc
 }
 
 var (
 	gmu     sync.Mutex
 	current *run
-	httpcli = &http.Client{}
+	// 直连中转站(不走系统代理)+ 拨号/握手超时,避免高并发下连接级卡死;
+	// HTTP/2 可在单连接上复用大量并发流,显著降低端口/文件描述符消耗。
+	httpcli = &http.Client{Transport: generator.NewTransport(256)}
 )
 
 // State 返回当前压测的简单状态(供启动前判断是否在跑)。
@@ -64,6 +74,7 @@ type StartParams struct {
 	Size        string
 	Quality     string
 	Fmt         string
+	Save        bool
 }
 
 // Start 启动一轮压测(异步)。
@@ -73,7 +84,7 @@ func Start(sp StartParams) {
 
 	r := &run{
 		Status: "running", Total: sp.Total, Concurrency: sp.Concurrency,
-		Model: sp.Model, Size: sp.Size, Fmt: sp.Fmt,
+		Model: sp.Model, Size: sp.Size, Fmt: sp.Fmt, saveImgs: sp.Save,
 		Errors: map[string]int{}, StartMono: time.Now(), StartedAt: time.Now().Unix(),
 	}
 	gmu.Lock()
@@ -81,8 +92,10 @@ func Start(sp StartParams) {
 	gmu.Unlock()
 
 	if base == "" || key == "" {
+		r.mu.Lock()
 		r.Status = "error"
 		r.ErrMsg = "未配置中转站地址或密钥"
+		r.mu.Unlock()
 		return
 	}
 
@@ -138,7 +151,13 @@ func Start(sp StartParams) {
 					dispatched++
 					dmu.Unlock()
 
-					ok, lat, status, errLine := doOne(ctx, endpoint, body, headers, timeout, sp.Fmt)
+					save := false
+					if r.saveImgs {
+						r.mu.Lock()
+						save = len(r.Images) < maxSavedImages
+						r.mu.Unlock()
+					}
+					ok, lat, status, errLine, imgs := doOne(ctx, endpoint, body, headers, timeout, sp.Fmt, save)
 					r.mu.Lock()
 					r.Done++
 					r.Latencies = append(r.Latencies, lat)
@@ -151,6 +170,11 @@ func Start(sp StartParams) {
 							label = "[" + itoa(status) + "] " + errLine
 						}
 						r.Errors[label]++
+					}
+					for _, im := range imgs {
+						if len(r.Images) < maxSavedImages {
+							r.Images = append(r.Images, store.Image{Filename: im.Filename, URL: im.URL})
+						}
 					}
 					r.mu.Unlock()
 				}
@@ -166,17 +190,27 @@ func Start(sp StartParams) {
 			}
 		}
 		r.Elapsed = time.Since(r.StartMono).Seconds()
+		files := make([]string, 0, len(r.Images))
+		for _, im := range r.Images {
+			files = append(files, im.Filename)
+		}
 		r.mu.Unlock()
+		if len(files) > 0 {
+			store.AddHistory("stress", sp.Prompt, sp.Model, sp.Size, sp.Quality, len(files), files)
+		}
 	}()
 }
 
-func doOne(ctx context.Context, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode string) (ok bool, latMs float64, status int, errLine string) {
+// doOne 发一次压测请求。save 为 true 时完整读取响应并把图片落盘(imgs 返回保存结果);
+// 否则只读响应头部 64KB 判定成败、其余直接丢弃——b64 图片响应动辄数 MB,
+// 高并发下整体读进内存会把机器打爆(OOM 假死),这是压测「卡死」的主因之一。
+func doOne(ctx context.Context, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode string, save bool) (ok bool, latMs float64, status int, errLine string, imgs []generator.Result) {
 	start := time.Now()
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return false, ms(start), 0, "构造请求失败"
+		return false, ms(start), 0, "构造请求失败", nil
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -184,29 +218,60 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 	resp, err := httpcli.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false, ms(start), 0, "已取消"
+			return false, ms(start), 0, "已取消", nil
 		}
 		if strings.Contains(err.Error(), "deadline") || strings.Contains(err.Error(), "timeout") {
-			return false, ms(start), 0, "超时"
+			return false, ms(start), 0, "超时", nil
 		}
-		return false, ms(start), 0, "连接失败:" + err.Error()
+		return false, ms(start), 0, "连接失败:" + err.Error(), nil
 	}
 	defer resp.Body.Close()
-	data := readAll(resp.Body)
-	lat := ms(start)
+
 	if resp.StatusCode != 200 {
+		data := readCap(resp.Body, 64<<10)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		lat := ms(start)
 		line := firstLine(generator.ExtractError(resp.StatusCode, data, resp.Header), 160)
-		return false, lat, resp.StatusCode, line
+		return false, lat, resp.StatusCode, line, nil
 	}
+
+	if save {
+		data := readCap(resp.Body, 64<<20)
+		lat := ms(start)
+		var results []generator.Result
+		if fmtMode == "chat" {
+			results, _ = generator.ParseChatBody(rctx, data)
+		} else {
+			results, _ = generator.ParseImagesBody(rctx, data)
+			if len(results) == 0 {
+				return false, lat, 200, "200 但无图片数据", nil
+			}
+		}
+		return true, lat, 200, "", results
+	}
+
+	const headCap = 64 << 10
+	head := readCap(resp.Body, headCap)
+	complete := len(head) < headCap
+	_, _ = io.Copy(io.Discard, resp.Body) // 排空剩余响应,连接才能复用
+	lat := ms(start)
 	if fmtMode != "chat" {
-		var parsed struct {
-			Data []json.RawMessage `json:"data"`
+		okData := false
+		if complete {
+			var parsed struct {
+				Data []json.RawMessage `json:"data"`
+			}
+			okData = json.Unmarshal(head, &parsed) == nil && len(parsed.Data) > 0
+		} else {
+			// 超过 64KB 的 200 响应必然是 b64 图片,JSON 不完整无法解析,
+			// 头部出现 "data" 字段即视为成功(错误响应都很小,不会走到这里)。
+			okData = bytes.Contains(head, []byte(`"data"`))
 		}
-		if json.Unmarshal(data, &parsed) != nil || len(parsed.Data) == 0 {
-			return false, lat, 200, "200 但无图片数据"
+		if !okData {
+			return false, lat, 200, "200 但无图片数据", nil
 		}
 	}
-	return true, lat, 200, ""
+	return true, lat, 200, "", nil
 }
 
 // Cancel 停止当前压测。
@@ -243,6 +308,8 @@ func Stats() map[string]any {
 	for k, v := range r.Errors {
 		errs[k] = v
 	}
+	imgs := make([]store.Image, len(r.Images))
+	copy(imgs, r.Images)
 	elapsed := r.Elapsed
 	if elapsed == 0 && !r.StartMono.IsZero() {
 		elapsed = time.Since(r.StartMono).Seconds()
@@ -269,6 +336,7 @@ func Stats() map[string]any {
 		"lat_p50":     pct(lats, 50),
 		"lat_p95":     pct(lats, 95),
 		"errors":      errs,
+		"images":      imgs,
 	}
 	if r.ErrMsg != "" {
 		out["error"] = r.ErrMsg
@@ -280,20 +348,9 @@ func Stats() map[string]any {
 
 func ms(start time.Time) float64 { return float64(time.Since(start).Microseconds()) / 1000.0 }
 
-func readAll(r interface{ Read([]byte) (int, error) }) []byte {
-	buf := make([]byte, 0, 1024)
-	tmp := make([]byte, 4096)
-	for {
-		n, err := r.Read(tmp)
-		buf = append(buf, tmp[:n]...)
-		if err != nil {
-			break
-		}
-		if len(buf) > 1<<20 { // 压测只看是否有数据,读 1MB 足够
-			break
-		}
-	}
-	return buf
+func readCap(r io.Reader, n int64) []byte {
+	b, _ := io.ReadAll(io.LimitReader(r, n))
+	return b
 }
 
 func firstLine(s string, n int) string {

@@ -24,12 +24,12 @@ export default function Modal({ open, onClose, title, subtitle, children, width 
       >
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 z-10 grid h-9 w-9 place-items-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-white"
+          className="absolute right-4 top-4 z-10 grid h-9 w-9 place-items-center rounded-lg text-slate-400 hover:bg-slate-400/10 hover:text-slate-100"
         >
           <X size={18} />
         </button>
         <div className="px-6 pt-6 pb-3">
-          <h2 className="text-lg font-semibold text-white">{title}</h2>
+          <h2 className="text-lg font-semibold text-slate-100">{title}</h2>
           {subtitle && <p className="mt-1 text-xs text-slate-400">{subtitle}</p>}
         </div>
         <div className="flex-1 overflow-y-auto px-6 pb-4">{children}</div>

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,8 +42,23 @@ type Result struct {
 
 var (
 	outputDir string
-	client    = &http.Client{}
+	client    = &http.Client{Transport: NewTransport(64)}
 )
+
+// NewTransport 返回直连中转站的 Transport:不读系统 HTTP_PROXY/HTTPS_PROXY
+// (经代理转发在高并发下会整体卡死),并给拨号/TLS 握手设独立超时,
+// 避免连接级卡住只能干等整体超时。
+func NewTransport(maxIdlePerHost int) *http.Transport {
+	return &http.Transport{
+		Proxy:               nil,
+		DialContext:         (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 15 * time.Second,
+		MaxIdleConns:        maxIdlePerHost * 2,
+		MaxIdleConnsPerHost: maxIdlePerHost,
+		IdleConnTimeout:     90 * time.Second,
+	}
+}
 
 // Init 设定图片输出目录。
 func Init(dir string) {
@@ -433,6 +449,23 @@ func GenerateViaChat(ctx context.Context, p Params) ([]Result, error) {
 		results = append(results, imgs...)
 	}
 	return results, nil
+}
+
+// ParseImagesBody 解析 /v1/images/generations 风格的 200 响应,把其中的图片
+// 保存到 outputs/ 并返回结果(供压测「保存图片」复用)。
+func ParseImagesBody(ctx context.Context, body []byte) ([]Result, error) {
+	var parsed struct {
+		Data []genItem `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Data) == 0 {
+		return nil, nil
+	}
+	return normalizeItems(ctx, parsed.Data)
+}
+
+// ParseChatBody 解析 /v1/chat/completions 响应里的图片并保存到 outputs/(供压测复用)。
+func ParseChatBody(ctx context.Context, body []byte) ([]Result, error) {
+	return extractImagesFromChat(ctx, body)
 }
 
 // EditFile 是一张待编辑/参考的图片。

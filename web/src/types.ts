@@ -95,6 +95,7 @@ export interface StressStatus {
   lat_p50: number
   lat_p95: number
   errors: Record<string, number>
+  images?: ImageRef[]
   error?: string
 }
 

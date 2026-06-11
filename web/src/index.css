@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-/* ---- 设计令牌 ---- */
+/* ---- 设计令牌(深色为默认主题) ---- */
 @theme {
   --color-ink-950: #07080c;
   --color-ink-900: #0b0d13;
@@ -17,6 +17,52 @@
   --color-fuchsia-500: #d946ef;
 }
 
+:root {
+  --app-fg: #e8eaf2;
+  --app-bg: radial-gradient(1200px 800px at 80% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
+    radial-gradient(1000px 700px at -10% 110%, rgba(217, 70, 239, 0.1), transparent 55%),
+    var(--color-ink-950);
+  --placeholder: #5b6478;
+  --chip-fg: #9aa3b8;
+  --chip-fg-hover: #d6dbea;
+  --ghost-hover-fg: #fff;
+  --glass-overlay: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0));
+}
+
+/* ---- 浅色主题:整套重映射表面/线条/文本/强调色变量,工具类无需改动 ---- */
+:root.light {
+  --color-ink-950: #eef1f7;
+  --color-ink-900: #f3f5fa;
+  --color-ink-850: #ffffff;
+  --color-ink-800: #f1f4f9;
+  --color-ink-700: #e3e7f0;
+  --color-ink-600: #ccd3e2;
+  --color-line: #dde2ee;
+
+  --color-slate-100: #18223a;
+  --color-slate-200: #28334e;
+  --color-slate-300: #3d4965;
+  --color-slate-400: #5b6883;
+  --color-slate-500: #6b7790;
+  --color-slate-600: #8b95ab;
+  --color-slate-700: #cdd5e4;
+
+  --color-brand-400: #4f46e5;
+  --color-amber-300: #92610b;
+  --color-rose-400: #e11d48;
+  --color-emerald-400: #047857;
+
+  --app-fg: #1c2438;
+  --app-bg: radial-gradient(1200px 800px at 80% -10%, rgba(99, 102, 241, 0.1), transparent 60%),
+    radial-gradient(1000px 700px at -10% 110%, rgba(217, 70, 239, 0.07), transparent 55%),
+    var(--color-ink-950);
+  --placeholder: #9aa4ba;
+  --chip-fg: #5b6883;
+  --chip-fg-hover: #28334e;
+  --ghost-hover-fg: #1c2438;
+  --glass-overlay: linear-gradient(180deg, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0));
+}
+
 @layer base {
   html,
   body,
@@ -25,10 +71,8 @@
   }
   body {
     margin: 0;
-    background: radial-gradient(1200px 800px at 80% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
-      radial-gradient(1000px 700px at -10% 110%, rgba(217, 70, 239, 0.1), transparent 55%),
-      var(--color-ink-950);
-    color: #e8eaf2;
+    background: var(--app-bg);
+    color: var(--app-fg);
     font-family: 'Inter', -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
     -webkit-font-smoothing: antialiased;
   }
@@ -50,8 +94,7 @@
 
 @layer components {
   .glass {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
-      var(--color-ink-850);
+    background: var(--glass-overlay), var(--color-ink-850);
     border: 1px solid var(--color-line);
     backdrop-filter: blur(12px);
   }
@@ -75,7 +118,7 @@
   }
   .btn-ghost:hover {
     border-color: var(--color-brand-500);
-    color: #fff;
+    color: var(--ghost-hover-fg);
   }
   .btn:disabled {
     @apply opacity-40 cursor-not-allowed;
@@ -93,7 +136,7 @@
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
   }
   .field::placeholder {
-    color: #5b6478;
+    color: var(--placeholder);
   }
 
   .lbl {
@@ -104,11 +147,11 @@
     @apply rounded-full px-3 py-1.5 text-xs font-medium cursor-pointer transition-all duration-150 select-none;
     background: var(--color-ink-800);
     border: 1px solid var(--color-line);
-    color: #9aa3b8;
+    color: var(--chip-fg);
   }
   .chip:hover {
     border-color: var(--color-brand-500);
-    color: #d6dbea;
+    color: var(--chip-fg-hover);
   }
   .chip-on {
     background: linear-gradient(135deg, var(--color-brand-500), var(--color-violet-500));

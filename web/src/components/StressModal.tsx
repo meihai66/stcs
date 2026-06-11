@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Play, Square, Zap } from 'lucide-react'
 import { api } from '../api'
 import type { Config, StressStatus } from '../types'
@@ -9,6 +9,7 @@ interface Props {
   open: boolean
   onClose: () => void
   config: Config
+  onLightbox: (url: string) => void
 }
 
 const STLABEL: Record<string, string> = {
@@ -18,45 +19,38 @@ const STLABEL: Record<string, string> = {
   error: '出错',
 }
 
-export default function StressModal({ open, onClose, config }: Props) {
+export default function StressModal({ open, onClose, config, onLightbox }: Props) {
   const [prompt, setPrompt] = useState('a cute cat')
   const [total, setTotal] = useState(20)
   const [conc, setConc] = useState(5)
   const [model, setModel] = useState('')
   const [fmt, setFmt] = useState('images')
   const [quality, setQuality] = useState('high')
+  const [save, setSave] = useState(true)
   const [size, setSize] = useState<SizeState>({ ratio: '1:1', tier: '1K', custom: '' })
   const [stat, setStat] = useState<StressStatus | null>(null)
   const [note, setNote] = useState('')
-  const timer = useRef<number | null>(null)
 
   const running = stat?.status === 'running'
 
-  function stopPolling() {
-    if (timer.current) {
-      clearInterval(timer.current)
-      timer.current = null
-    }
-  }
-
   async function refresh() {
     try {
-      const s = await api.stressStatus()
-      setStat(s)
-      if (s.status !== 'running') stopPolling()
+      setStat(await api.stressStatus())
     } catch {
       /* ignore */
     }
   }
 
+  // 弹窗打开期间持续轮询(运行中 800ms 一次,空闲时也保持轮询以便
+  // 关掉弹窗再打开时进度能继续刷新——旧版重开弹窗后轮询不恢复,看起来像卡死)
   useEffect(() => {
-    if (open) {
-      setFmt(config.request_format === 'chat' ? 'chat' : 'images')
+    if (!open) return
+    setFmt(config.request_format === 'chat' ? 'chat' : 'images')
+    refresh()
+    const id = window.setInterval(() => {
       refresh()
-    } else {
-      stopPolling()
-    }
-    return stopPolling
+    }, 800)
+    return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -71,10 +65,9 @@ export default function StressModal({ open, onClose, config }: Props) {
         size: sizeOf(size),
         quality,
         request_format: fmt,
+        save,
       })
       if (r.capped) setNote(`并发 ${r.requested} 超过上限,已限到 ${r.cap}`)
-      stopPolling()
-      timer.current = window.setInterval(refresh, 700)
       refresh()
     } catch (e) {
       setNote((e as Error).message)
@@ -83,14 +76,17 @@ export default function StressModal({ open, onClose, config }: Props) {
 
   async function stop() {
     await api.stressStop()
+    refresh()
   }
 
   const pct = stat && stat.total ? Math.round((stat.done / stat.total) * 100) : 0
+  const images = stat?.images || []
 
   return (
     <Modal open={open} onClose={onClose} title="⚡ 生图压测" width={640}>
       <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
-        ⚠️ 压测会真实调用中转站、产生计费/消耗额度!仅测速不保存图片。并发无硬上限,但填太高会被中转站限流(429)或耗尽本机端口。建议从 20/50/100/200 往上测,找失败率开始飙升的临界点。
+        ⚠️ 压测会真实调用中转站、产生计费/消耗额度!并发无硬上限,但填太高会被中转站限流(429)或耗尽本机端口。建议从
+        20/50/100/200 往上测,找失败率开始飙升的临界点。
       </div>
 
       <label className="lbl !mt-0">压测提示词</label>
@@ -132,6 +128,16 @@ export default function StressModal({ open, onClose, config }: Props) {
       <div className="mt-1">
         <SizePicker value={size} onChange={setSize} />
       </div>
+
+      <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+        <input
+          type="checkbox"
+          checked={save}
+          onChange={(e) => setSave(e.target.checked)}
+          className="h-4 w-4 accent-indigo-500"
+        />
+        保存生成的图片(最多 200 张,写入历史记录;高并发时建议关闭以省内存/磁盘)
+      </label>
 
       <div className="mt-4 flex gap-2">
         <button className="btn btn-primary flex-1 py-2.5" onClick={start} disabled={running}>
@@ -192,6 +198,27 @@ export default function StressModal({ open, onClose, config }: Props) {
                   </div>
                 )}
               </div>
+              {!!images.length && (
+                <div className="mt-3">
+                  <div className="mb-2 sec-title">
+                    生成的图片({images.length})<span className="ln" />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {images.map((im) => (
+                      <img
+                        key={im.filename}
+                        src={im.url}
+                        loading="lazy"
+                        onClick={() => onLightbox(im.url)}
+                        className="h-[72px] w-[72px] cursor-pointer rounded-lg border border-[var(--color-line)] object-cover transition hover:brightness-110"
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-2 text-[11px] text-slate-500">
+                    点击图片放大查看,放大后可下载保存;压测结束后也可在「历史记录」中找到这批图。
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
