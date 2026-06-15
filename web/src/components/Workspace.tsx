@@ -74,20 +74,32 @@ export default function Workspace(p: Props) {
         <div className="grid gap-3">
           {p.history.map((h) => (
             <div key={h.id} className="card flex gap-3.5">
-              <div className="flex flex-wrap gap-2">
-                {h.images.map((im) => (
-                  <img
-                    key={im.filename}
-                    src={im.url}
-                    onClick={() => p.onLightbox(im.url)}
-                    className="h-[88px] w-[88px] cursor-pointer rounded-lg border border-[var(--color-line)] object-cover transition hover:brightness-110"
-                  />
-                ))}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="break-words text-sm font-medium text-slate-200">{h.prompt}</div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {new Date(h.created_at * 1000).toLocaleString('zh-CN')} · {h.mode} · {h.size} · {h.quality} · {h.model}
+              {h.images.length > 0 && (
+                <div className="flex max-w-[184px] shrink-0 flex-wrap content-start gap-2">
+                  {h.images.map((im) => (
+                    <img
+                      key={im.filename}
+                      src={im.url}
+                      onClick={() => p.onLightbox(im.url)}
+                      className="h-[88px] w-[88px] cursor-pointer rounded-lg border border-[var(--color-line)] object-cover transition hover:brightness-110"
+                    />
+                  ))}
+                </div>
+              )}
+              <div className="flex min-w-0 flex-1 flex-col">
+                <div
+                  className="line-clamp-3 break-words text-sm font-medium leading-relaxed text-slate-200"
+                  title={h.prompt}
+                >
+                  {h.prompt || '(无提示词)'}
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+                  <span>{new Date(h.created_at * 1000).toLocaleString('zh-CN')}</span>
+                  {[h.mode, h.size, h.quality, h.model].filter(Boolean).map((v, i) => (
+                    <span key={i} className="break-all rounded bg-[var(--color-ink-800)] px-1.5 py-0.5">
+                      {v}
+                    </span>
+                  ))}
                 </div>
                 <div className="mt-2.5 flex flex-wrap gap-1.5">
                   <button className="btn btn-ghost !px-2.5 !py-1 text-xs" onClick={() => p.onReuse(h.prompt)}>
