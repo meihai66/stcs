@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/meihai66/stcs/internal/reqlog"
 )
 
 // GenError 是带可读信息的生图错误。
@@ -253,21 +255,24 @@ func Generate(ctx context.Context, p Params) ([]Result, error) {
 	if status != 200 {
 		return nil, genErr("%s", extractError(status, body, nil))
 	}
+	// 只要 200 就算成功;若没解析到图片,记一条日志便于排查,但不报错。
 	var parsed struct {
 		Data []genItem `json:"data"`
 	}
+	var results []Result
+	reason := ""
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, genErr("中转站返回非 JSON:%s", trunc(string(body), 300))
-	}
-	if len(parsed.Data) == 0 {
-		return nil, genErr("中转站未返回图片数据:%s", trunc(string(body), 300))
-	}
-	results, err := normalizeItems(ctx, parsed.Data)
-	if err != nil {
+		reason = "200 但响应非 JSON"
+	} else if len(parsed.Data) == 0 {
+		reason = "200 但响应 data 为空"
+	} else if results, err = normalizeItems(ctx, parsed.Data); err != nil {
 		return nil, err
+	} else if len(results) == 0 {
+		reason = "200 但 data 里没有可解析的图片(无 b64_json / url)"
 	}
-	if len(results) == 0 {
-		return nil, genErr("返回的数据里没有可解析的图片(无 b64_json / url)。")
+	if reason != "" {
+		req, _ := json.Marshal(payload)
+		reqlog.Add("images", endpoint, p.Model, string(req), string(body), reason, status)
 	}
 	return results, nil
 }
@@ -443,8 +448,12 @@ func GenerateViaChat(ctx context.Context, p Params) ([]Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		// 只要 200 就算成功;这一轮没抽到图就记日志,继续下一轮。
 		if len(imgs) == 0 {
-			return nil, genErr("对话接口未返回图片(可能该模型/中转站不支持对话生图)。返回:%s", trunc(chatText(body), 200))
+			req, _ := json.Marshal(payload)
+			reqlog.Add("chat", endpoint, p.Model, string(req), string(body),
+				"200 但对话响应中没有图片(可能该模型/中转站不支持对话生图)", status)
+			continue
 		}
 		results = append(results, imgs...)
 	}
@@ -508,18 +517,23 @@ func Edit(ctx context.Context, prompt string, images []EditFile, p Params) ([]Re
 	if status != 200 {
 		return nil, genErr("%s", extractError(status, body, nil))
 	}
+	// 只要 200 就算成功;没解析到图片则记日志,不报错。
 	var parsed struct {
 		Data []genItem `json:"data"`
 	}
+	var results []Result
+	reason := ""
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, genErr("中转站返回非 JSON:%s", trunc(string(body), 300))
-	}
-	results, err := normalizeItems(ctx, parsed.Data)
-	if err != nil {
+		reason = "200 但响应非 JSON"
+	} else if results, err = normalizeItems(ctx, parsed.Data); err != nil {
 		return nil, err
+	} else if len(results) == 0 {
+		reason = "200 但编辑接口未返回可解析的图片"
 	}
-	if len(results) == 0 {
-		return nil, genErr("编辑接口未返回可解析的图片。")
+	if reason != "" {
+		req := fmt.Sprintf(`{"model":%q,"prompt":%q,"n":%d,"size":%q,"images":%d}`,
+			p.Model, prompt, p.N, p.Size, len(images))
+		reqlog.Add("edit", endpoint, p.Model, req, string(body), reason, status)
 	}
 	return results, nil
 }

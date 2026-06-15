@@ -4,6 +4,8 @@ import type {
   HistoryItem,
   MarketItem,
   Profile,
+  RequestLog,
+  RequestLogMeta,
   StressStatus,
   Task,
 } from './types'
@@ -48,12 +50,14 @@ export const api = {
   edit: (form: FormData) =>
     req<{ images: { filename: string; url: string }[] }>('/api/edit', { method: 'POST', body: form }),
   listTasks: () => req<{ tasks: Task[] }>('/api/tasks'),
+  clearTasks: () => req<{ ok: boolean; removed: number }>('/api/tasks', { method: 'DELETE' }),
   reversePrompt: (form: FormData) =>
     req<{ prompt: string }>('/api/reverse-prompt', { method: 'POST', body: form }),
 
   // ---- 历史 / 收藏 ----
   listHistory: () => req<{ history: HistoryItem[] }>('/api/history'),
   deleteHistory: (id: number) => req<{ ok: boolean }>(`/api/history/${id}`, { method: 'DELETE' }),
+  clearHistory: () => req<{ ok: boolean }>('/api/history', { method: 'DELETE' }),
   listFavorites: () => req<{ favorites: Favorite[] }>('/api/favorites'),
   addFavorite: (prompt: string, name: string) =>
     req<{ ok: boolean }>('/api/favorites', jsonBody({ prompt, name })),
@@ -70,6 +74,11 @@ export const api = {
     ),
   stressStatus: () => req<StressStatus>('/api/stress/status'),
   stressStop: () => req<{ ok: boolean }>('/api/stress/stop', { method: 'POST' }),
+
+  // ---- 请求日志(200 无图) ----
+  requestLogs: () => req<{ logs: RequestLogMeta[] }>('/api/request-logs'),
+  requestLog: (id: number) => req<{ log: RequestLog }>(`/api/request-logs/${id}`),
+  clearRequestLogs: () => req<{ ok: boolean }>('/api/request-logs', { method: 'DELETE' }),
 }
 
 export const SIZE_MATRIX: Record<string, Record<string, string>> = {

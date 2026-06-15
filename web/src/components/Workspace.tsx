@@ -16,6 +16,8 @@ interface Props {
   onReuse: (prompt: string) => void
   onDeleteHistory: (id: number) => void
   onRefreshTasks: () => void
+  onClearTasks: () => void
+  onClearHistory: () => void
 }
 
 export default function Workspace(p: Props) {
@@ -29,6 +31,16 @@ export default function Workspace(p: Props) {
         <button className="btn btn-ghost !px-2.5 !py-1 text-xs" onClick={p.onRefreshTasks}>
           <RefreshCw size={13} /> 刷新
         </button>
+        {p.tasks.some((t) => t.status === 'done' || t.status === 'error') && (
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-xs hover:!border-rose-500 hover:!text-rose-400"
+            onClick={() => {
+              if (window.confirm('清理所有已完成/失败的任务?(排队中、生成中的保留)')) p.onClearTasks()
+            }}
+          >
+            <Trash2 size={13} /> 清理已完成
+          </button>
+        )}
       </div>
       {p.tasks.length === 0 ? (
         <div className="card text-sm text-slate-500">暂无任务</div>
@@ -41,8 +53,20 @@ export default function Workspace(p: Props) {
       )}
 
       {/* 历史 */}
-      <div className="mb-4 mt-9 sec-title">
-        历史记录<span className="ln" />
+      <div className="mb-4 mt-9 flex items-center gap-3">
+        <div className="sec-title flex-1">
+          历史记录<span className="ln" />
+        </div>
+        {p.history.length > 0 && (
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-xs hover:!border-rose-500 hover:!text-rose-400"
+            onClick={() => {
+              if (window.confirm('清空全部历史记录?(已生成的图片文件保留)')) p.onClearHistory()
+            }}
+          >
+            <Trash2 size={13} /> 清空历史
+          </button>
+        )}
       </div>
       {p.history.length === 0 ? (
         <div className="card text-sm text-slate-500">还没有生成记录</div>

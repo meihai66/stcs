@@ -132,6 +132,27 @@ func DeleteHistory(id int64) []string {
 	return files
 }
 
+// ClearHistory 清空全部历史,返回所有关联文件名(供调用方决定是否删盘上文件)。
+func ClearHistory() []string {
+	mu.Lock()
+	defer mu.Unlock()
+	var all []string
+	if rows, err := db.Query(`SELECT files FROM history`); err == nil {
+		for rows.Next() {
+			var filesJSON sql.NullString
+			if rows.Scan(&filesJSON) == nil && filesJSON.Valid {
+				var files []string
+				if json.Unmarshal([]byte(filesJSON.String), &files) == nil {
+					all = append(all, files...)
+				}
+			}
+		}
+		rows.Close()
+	}
+	_, _ = db.Exec(`DELETE FROM history`)
+	return all
+}
+
 // AddFavorite 新增收藏,返回 id。
 func AddFavorite(prompt, name string) int64 {
 	mu.Lock()

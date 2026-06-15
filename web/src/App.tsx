@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, LogOut, Moon, Settings, ShoppingBag, Sparkles, Star, Sun, Zap } from 'lucide-react'
+import { Download, LogOut, Moon, ScrollText, Settings, ShoppingBag, Sparkles, Star, Sun, Zap } from 'lucide-react'
 import { api } from './api'
 import type { Config, HistoryItem, Mode, Profile, Task } from './types'
 import LoginGate from './components/LoginGate'
@@ -9,6 +9,7 @@ import SettingsModal from './components/SettingsModal'
 import FavoritesModal from './components/FavoritesModal'
 import MarketModal from './components/MarketModal'
 import StressModal from './components/StressModal'
+import RequestLogsModal from './components/RequestLogsModal'
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
@@ -23,7 +24,7 @@ export default function App() {
   const [editSources, setEditSources] = useState<string[]>([])
 
   const [lightbox, setLightbox] = useState<string | null>(null)
-  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress'>('')
+  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress' | 'logs'>('')
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('stcs-theme') === 'light' ? 'light' : 'dark'),
   )
@@ -148,6 +149,9 @@ export default function App() {
           <button className="btn btn-ghost" onClick={() => setModal('stress')}>
             <Zap size={15} /> 压测
           </button>
+          <button className="btn btn-ghost" onClick={() => setModal('logs')} title="查看 200 无图的请求日志">
+            <ScrollText size={15} /> 日志
+          </button>
           <button className="btn btn-ghost" onClick={() => setModal('favorites')}>
             <Star size={15} /> 模板
           </button>
@@ -189,6 +193,8 @@ export default function App() {
           onReuse={(p) => { setPrompt(p); window.scrollTo(0, 0) }}
           onDeleteHistory={async (id) => { await api.deleteHistory(id); loadHistory() }}
           onRefreshTasks={loadTasks}
+          onClearTasks={async () => { await api.clearTasks(); loadTasks() }}
+          onClearHistory={async () => { await api.clearHistory(); loadHistory() }}
         />
       </div>
 
@@ -214,6 +220,7 @@ export default function App() {
         config={config}
         onLightbox={setLightbox}
       />
+      <RequestLogsModal open={modal === 'logs'} onClose={() => setModal('')} />
 
       {/* 灯箱 */}
       {lightbox && (

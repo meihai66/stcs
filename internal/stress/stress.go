@@ -17,6 +17,7 @@ import (
 
 	"github.com/meihai66/stcs/internal/config"
 	"github.com/meihai66/stcs/internal/generator"
+	"github.com/meihai66/stcs/internal/reqlog"
 	"github.com/meihai66/stcs/internal/store"
 )
 
@@ -157,7 +158,7 @@ func Start(sp StartParams) {
 						save = len(r.Images) < maxSavedImages
 						r.mu.Unlock()
 					}
-					ok, lat, status, errLine, imgs := doOne(ctx, endpoint, body, headers, timeout, sp.Fmt, save)
+					ok, lat, status, errLine, imgs := doOne(ctx, endpoint, body, headers, timeout, sp.Fmt, sp.Model, save)
 					r.mu.Lock()
 					r.Done++
 					r.Latencies = append(r.Latencies, lat)
@@ -204,7 +205,7 @@ func Start(sp StartParams) {
 // doOne 发一次压测请求。save 为 true 时完整读取响应并把图片落盘(imgs 返回保存结果);
 // 否则只读响应头部 64KB 判定成败、其余直接丢弃——b64 图片响应动辄数 MB,
 // 高并发下整体读进内存会把机器打爆(OOM 假死),这是压测「卡死」的主因之一。
-func doOne(ctx context.Context, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode string, save bool) (ok bool, latMs float64, status int, errLine string, imgs []generator.Result) {
+func doOne(ctx context.Context, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode, model string, save bool) (ok bool, latMs float64, status int, errLine string, imgs []generator.Result) {
 	start := time.Now()
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -235,6 +236,7 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 		return false, lat, resp.StatusCode, line, nil
 	}
 
+	// 只要 200 就算生图成功;若没拿到图片,记一条日志便于排查,但仍计成功。
 	if save {
 		data := readCap(resp.Body, 64<<20)
 		lat := ms(start)
@@ -243,9 +245,9 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 			results, _ = generator.ParseChatBody(rctx, data)
 		} else {
 			results, _ = generator.ParseImagesBody(rctx, data)
-			if len(results) == 0 {
-				return false, lat, 200, "200 但无图片数据", nil
-			}
+		}
+		if len(results) == 0 {
+			reqlog.Add("stress", endpoint, model, string(body), string(data), "200 但未解析到图片", 200)
 		}
 		return true, lat, 200, "", results
 	}
@@ -255,23 +257,36 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 	complete := len(head) < headCap
 	_, _ = io.Copy(io.Discard, resp.Body) // 排空剩余响应,连接才能复用
 	lat := ms(start)
+	hasImg := true
 	if fmtMode != "chat" {
-		okData := false
 		if complete {
 			var parsed struct {
 				Data []json.RawMessage `json:"data"`
 			}
-			okData = json.Unmarshal(head, &parsed) == nil && len(parsed.Data) > 0
+			hasImg = json.Unmarshal(head, &parsed) == nil && len(parsed.Data) > 0
 		} else {
 			// 超过 64KB 的 200 响应必然是 b64 图片,JSON 不完整无法解析,
-			// 头部出现 "data" 字段即视为成功(错误响应都很小,不会走到这里)。
-			okData = bytes.Contains(head, []byte(`"data"`))
+			// 头部出现 "data" 字段即视为有图(错误响应都很小,不会走到这里)。
+			hasImg = bytes.Contains(head, []byte(`"data"`))
 		}
-		if !okData {
-			return false, lat, 200, "200 但无图片数据", nil
-		}
+	} else {
+		// chat 不保存图时不会真正抽图,这里用轻量启发式判断响应里是否疑似带图。
+		hasImg = !complete || looksLikeChatImage(head)
+	}
+	if !hasImg {
+		reqlog.Add("stress", endpoint, model, string(body), string(head), "200 但响应中没有图片", 200)
 	}
 	return true, lat, 200, "", nil
+}
+
+// looksLikeChatImage 廉价判断一段对话响应里是否疑似含图片(URL / base64 / markdown)。
+func looksLikeChatImage(b []byte) bool {
+	for _, m := range []string{"data:image", "![", "b64_json", "image_url", ".png", ".jpg", ".jpeg", ".webp"} {
+		if bytes.Contains(b, []byte(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Cancel 停止当前压测。

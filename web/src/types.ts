@@ -100,3 +100,20 @@ export interface StressStatus {
 }
 
 export type Mode = 'images' | 'chat' | 'edit'
+
+// 列表用:不含请求体/响应体
+export interface RequestLogMeta {
+  id: number
+  time: number
+  source: string
+  endpoint: string
+  model: string
+  status: number
+  reason: string
+}
+
+// 单条查询:含完整请求体/响应体
+export interface RequestLog extends RequestLogMeta {
+  request: string
+  response: string
+}

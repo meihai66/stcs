@@ -148,6 +148,24 @@ func List(limit int) []Task {
 	return out
 }
 
+// Clear 清理所有已结束(done/error)的任务,保留排队中/生成中的,返回清理数量。
+func Clear() int {
+	mu.Lock()
+	defer mu.Unlock()
+	kept := make([]string, 0, len(order))
+	removed := 0
+	for _, id := range order {
+		if t := tasks[id]; t != nil && (t.Status == "done" || t.Status == "error") {
+			delete(tasks, id)
+			removed++
+			continue
+		}
+		kept = append(kept, id)
+	}
+	order = kept
+	return removed
+}
+
 func worker() {
 	for id := range queue {
 		runOne(id)

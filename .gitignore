@@ -8,6 +8,7 @@
 # 前端
 web/node_modules/
 web/dist/
+web/*.tsbuildinfo
 
 # 原 Python 版(仅本地参考,不纳入仓库)
 GPT和Gemini生图带压测/

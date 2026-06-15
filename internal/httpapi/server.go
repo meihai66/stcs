@@ -15,6 +15,7 @@ import (
 
 	"github.com/meihai66/stcs/internal/config"
 	"github.com/meihai66/stcs/internal/generator"
+	"github.com/meihai66/stcs/internal/reqlog"
 	"github.com/meihai66/stcs/internal/store"
 	"github.com/meihai66/stcs/internal/stress"
 	"github.com/meihai66/stcs/internal/tasks"
@@ -42,9 +43,11 @@ func New(staticFS fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/generate", requireAuth(generate))
 	mux.HandleFunc("GET /api/tasks", requireAuth(listTasks))
 	mux.HandleFunc("GET /api/tasks/{id}", requireAuth(getTask))
+	mux.HandleFunc("DELETE /api/tasks", requireAuth(clearTasks))
 	mux.HandleFunc("POST /api/edit", requireAuth(editImage))
 
 	mux.HandleFunc("GET /api/history", requireAuth(listHistory))
+	mux.HandleFunc("DELETE /api/history", requireAuth(clearHistory))
 	mux.HandleFunc("DELETE /api/history/{id}", requireAuth(deleteHistory))
 	mux.HandleFunc("GET /api/favorites", requireAuth(listFavorites))
 	mux.HandleFunc("POST /api/favorites", requireAuth(addFavorite))
@@ -57,6 +60,10 @@ func New(staticFS fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/stress/start", requireAuth(stressStart))
 	mux.HandleFunc("GET /api/stress/status", requireAuth(stressStatus))
 	mux.HandleFunc("POST /api/stress/stop", requireAuth(stressStop))
+
+	mux.HandleFunc("GET /api/request-logs", requireAuth(listRequestLogs))
+	mux.HandleFunc("GET /api/request-logs/{id}", requireAuth(getRequestLog))
+	mux.HandleFunc("DELETE /api/request-logs", requireAuth(clearRequestLogs))
 
 	// ---- 对外 OpenAI 兼容 API(用 server_api_key 校验,不走密码门)----
 	mux.HandleFunc("GET /v1/models", openaiModels)
@@ -255,6 +262,12 @@ func getTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, t)
 }
 
+// clearTasks 清理已结束(done/error)的任务,保留排队中/生成中的。
+func clearTasks(w http.ResponseWriter, r *http.Request) {
+	removed := tasks.Clear()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
 func safeOutputPath(name string) string {
 	base := filepath.Base(name)
 	if base == "" || base == "." || base == "/" {
@@ -347,6 +360,17 @@ func listHistory(w http.ResponseWriter, r *http.Request) {
 func deleteHistory(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	files := store.DeleteHistory(id)
+	if r.URL.Query().Get("with_files") == "true" {
+		for _, f := range files {
+			_ = os.Remove(filepath.Join(generator.OutputDir(), filepath.Base(f)))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// clearHistory 清空全部历史记录;?with_files=true 时一并删除对应图片文件。
+func clearHistory(w http.ResponseWriter, r *http.Request) {
+	files := store.ClearHistory()
 	if r.URL.Query().Get("with_files") == "true" {
 		for _, f := range files {
 			_ = os.Remove(filepath.Join(generator.OutputDir(), filepath.Base(f)))
@@ -462,6 +486,33 @@ func stressStatus(w http.ResponseWriter, r *http.Request) {
 
 func stressStop(w http.ResponseWriter, r *http.Request) {
 	stress.Cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ----------------------------- 请求日志(200 无图) -----------------------------
+
+// listRequestLogs 只返回轻量元信息(不含请求体/响应体),保证列表接口不臃肿。
+func listRequestLogs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"logs": reqlog.List(0)})
+}
+
+// getRequestLog 按 id 返回单条完整记录(含请求体/响应体)。
+func getRequestLog(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "无效的日志 id")
+		return
+	}
+	e, ok := reqlog.Get(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "记录不存在(可能已被新日志挤出)")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"log": e})
+}
+
+func clearRequestLogs(w http.ResponseWriter, r *http.Request) {
+	reqlog.Clear()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
