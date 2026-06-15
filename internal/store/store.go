@@ -56,7 +56,8 @@ func Init(dbPath string) error {
 		return err
 	}
 	d.SetMaxOpenConns(1) // SQLite 单写,串行化避免锁冲突
-	_, err = d.Exec(`
+	// 1) 先建表(对旧库,IF NOT EXISTS 是空操作,不会改动已有 history/favorites)。
+	if _, err = d.Exec(`
 		CREATE TABLE IF NOT EXISTS history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at INTEGER NOT NULL,
@@ -91,17 +92,19 @@ func Init(dbPath string) error {
 			key TEXT PRIMARY KEY,
 			value TEXT
 		);
+	`); err != nil {
+		return err
+	}
+	db = d
+	// 2) 兼容旧库:补 user_id 列(必须在建索引之前,否则索引引用不存在的列会失败)。
+	addColumnIfMissing("history", "user_id", "INTEGER NOT NULL DEFAULT 0")
+	addColumnIfMissing("favorites", "user_id", "INTEGER NOT NULL DEFAULT 0")
+	// 3) 列齐了再建索引。
+	_, _ = db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id);
 		CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);
 		CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at);
 	`)
-	if err != nil {
-		return err
-	}
-	db = d
-	// 兼容历史库:旧版表无 user_id 列时补上。
-	addColumnIfMissing("history", "user_id", "INTEGER NOT NULL DEFAULT 0")
-	addColumnIfMissing("favorites", "user_id", "INTEGER NOT NULL DEFAULT 0")
 	return nil
 }
 
