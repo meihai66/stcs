@@ -75,7 +75,10 @@ export const api = {
     req<{ prompt: string }>('/api/reverse-prompt', { method: 'POST', body: form }),
 
   // ---- 历史 / 收藏 ----
-  listHistory: (all = false) => req<{ history: HistoryItem[] }>(`/api/history${all ? '?all=true' : ''}`),
+  listHistory: (all = false, page = 1, pageSize = 12) =>
+    req<{ history: HistoryItem[]; total: number; page: number; page_size: number }>(
+      `/api/history?page=${page}&page_size=${pageSize}${all ? '&all=true' : ''}`,
+    ),
   deleteHistory: (id: number) => req<{ ok: boolean }>(`/api/history/${id}`, { method: 'DELETE' }),
   clearHistory: () => req<{ ok: boolean }>('/api/history', { method: 'DELETE' }),
   listFavorites: () => req<{ favorites: Favorite[] }>('/api/favorites'),

@@ -142,22 +142,50 @@ func AddHistory(userID int64, mode, prompt, model, size, quality string, n int, 
 	return id
 }
 
-// ListHistory 倒序返回某用户的历史。
+// ListHistory 倒序返回某用户的历史(等价于第一页)。
 func ListHistory(userID int64, limit int) []History {
+	return ListHistoryPage(userID, limit, 0)
+}
+
+// ListHistoryPage 倒序分页返回某用户的历史。offset 为跳过的条数。
+func ListHistoryPage(userID int64, limit, offset int) []History {
 	mu.Lock()
 	defer mu.Unlock()
 	rows, err := db.Query(`SELECT h.id, h.user_id, '', h.created_at, h.mode, h.prompt, h.model, h.size, h.quality, h.n, h.files
-		FROM history h WHERE h.user_id=? ORDER BY h.id DESC LIMIT ?`, userID, limit)
+		FROM history h WHERE h.user_id=? ORDER BY h.id DESC LIMIT ? OFFSET ?`, userID, limit, offset)
 	return scanHistory(rows, err)
 }
 
-// ListAllHistory 管理员视角:倒序返回全部用户历史(带用户名)。
+// ListAllHistory 管理员视角:倒序返回全部用户历史(带用户名,等价于第一页)。
 func ListAllHistory(limit int) []History {
+	return ListAllHistoryPage(limit, 0)
+}
+
+// ListAllHistoryPage 管理员视角:倒序分页返回全部用户历史(带用户名)。
+func ListAllHistoryPage(limit, offset int) []History {
 	mu.Lock()
 	defer mu.Unlock()
 	rows, err := db.Query(`SELECT h.id, h.user_id, COALESCE(u.username,''), h.created_at, h.mode, h.prompt, h.model, h.size, h.quality, h.n, h.files
-		FROM history h LEFT JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT ?`, limit)
+		FROM history h LEFT JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT ? OFFSET ?`, limit, offset)
 	return scanHistory(rows, err)
+}
+
+// CountHistory 返回某用户的历史总条数。
+func CountHistory(userID int64) int {
+	mu.Lock()
+	defer mu.Unlock()
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM history WHERE user_id=?`, userID).Scan(&n)
+	return n
+}
+
+// CountAllHistory 返回全部用户的历史总条数。
+func CountAllHistory() int {
+	mu.Lock()
+	defer mu.Unlock()
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM history`).Scan(&n)
+	return n
 }
 
 func scanHistory(rows *sql.Rows, err error) []History {

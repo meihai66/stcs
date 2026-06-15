@@ -12,6 +12,8 @@ import StressModal from './components/StressModal'
 import RequestLogsModal from './components/RequestLogsModal'
 import UsersModal from './components/UsersModal'
 
+const HISTORY_PAGE_SIZE = 12
+
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [config, setConfig] = useState<Config | null>(null)
@@ -19,6 +21,9 @@ export default function App() {
   const [active, setActive] = useState('')
   const [tasks, setTasks] = useState<Task[]>([])
   const [history, setHistory] = useState<HistoryItem[]>([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyPage, setHistoryPage] = useState(1)
+  const historyPageRef = useRef(1)
 
   const [mode, setMode] = useState<Mode>('images')
   const [prompt, setPrompt] = useState('')
@@ -49,15 +54,36 @@ export default function App() {
   }, [])
 
   const loadTasks = useCallback(async () => setTasks((await api.listTasks(viewAllRef.current)).tasks), [])
-  const loadHistory = useCallback(
-    async () => setHistory((await api.listHistory(viewAllRef.current)).history),
-    [],
-  )
+  const loadHistory = useCallback(async () => {
+    const res = await api.listHistory(viewAllRef.current, historyPageRef.current, HISTORY_PAGE_SIZE)
+    // 当前页被删空且非第一页(如删除/清理后)→ 回退到最后一页
+    if (res.history.length === 0 && res.total > 0 && historyPageRef.current > 1) {
+      const last = Math.max(1, Math.ceil(res.total / HISTORY_PAGE_SIZE))
+      historyPageRef.current = last
+      setHistoryPage(last)
+      const res2 = await api.listHistory(viewAllRef.current, last, HISTORY_PAGE_SIZE)
+      setHistory(res2.history)
+      setHistoryTotal(res2.total)
+      return
+    }
+    setHistory(res.history)
+    setHistoryTotal(res.total)
+  }, [])
+
+  function goHistoryPage(page: number) {
+    const total = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))
+    const p = Math.min(Math.max(1, page), total)
+    historyPageRef.current = p
+    setHistoryPage(p)
+    loadHistory()
+  }
 
   function toggleViewAll() {
     const v = !viewAll
     setViewAll(v)
     viewAllRef.current = v
+    historyPageRef.current = 1
+    setHistoryPage(1)
     loadTasks()
     loadHistory()
   }
@@ -222,6 +248,10 @@ export default function App() {
         <Workspace
           tasks={tasks}
           history={history}
+          historyTotal={historyTotal}
+          historyPage={historyPage}
+          historyPageSize={HISTORY_PAGE_SIZE}
+          onHistoryPage={goHistoryPage}
           showOwner={isAdmin && viewAll}
           onLightbox={setLightbox}
           onContinue={continueFrom}
@@ -229,7 +259,7 @@ export default function App() {
           onDeleteHistory={async (id) => { await api.deleteHistory(id); loadHistory() }}
           onRefreshTasks={loadTasks}
           onClearTasks={async () => { await api.clearTasks(); loadTasks() }}
-          onClearHistory={async () => { await api.clearHistory(); loadHistory() }}
+          onClearHistory={async () => { historyPageRef.current = 1; setHistoryPage(1); await api.clearHistory(); loadHistory() }}
         />
       </div>
 

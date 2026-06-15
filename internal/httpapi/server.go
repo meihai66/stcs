@@ -419,13 +419,31 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 
 // ----------------------------- 历史 / 收藏 -----------------------------
 
+// listHistory 分页返回历史。?page(默认1) & ?page_size(默认12,1~100);
+// 同时返回 total 供前端渲染分页控件。管理员 ?all=true 看全部用户。
 func listHistory(w http.ResponseWriter, r *http.Request) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 100)
-	if isAdmin(r) && r.URL.Query().Get("all") == "true" {
-		writeJSON(w, http.StatusOK, map[string]any{"history": store.ListAllHistory(limit)})
-		return
+	q := r.URL.Query()
+	pageSize := clamp(atoiDefault(q.Get("page_size"), 12), 1, 100)
+	page := atoiDefault(q.Get("page"), 1)
+	if page < 1 {
+		page = 1
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"history": store.ListHistory(currentUser(r).ID, limit)})
+	offset := (page - 1) * pageSize
+	var (
+		items []store.History
+		total int
+	)
+	if isAdmin(r) && q.Get("all") == "true" {
+		total = store.CountAllHistory()
+		items = store.ListAllHistoryPage(pageSize, offset)
+	} else {
+		uid := currentUser(r).ID
+		total = store.CountHistory(uid)
+		items = store.ListHistoryPage(uid, pageSize, offset)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"history": items, "total": total, "page": page, "page_size": pageSize,
+	})
 }
 
 func deleteHistory(w http.ResponseWriter, r *http.Request) {
