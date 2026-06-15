@@ -10,9 +10,12 @@ import (
 	"github.com/meihai66/stcs/internal/store"
 )
 
+// 对外 OpenAI 兼容 API 使用「首个管理员」的中转站配置(server_api_key 为全局)。
+func adminID() int64 { return store.FirstAdminID() }
+
 // checkServerKey 校验对外 API 的 server_api_key(未设置则不校验)。
 func checkServerKey(r *http.Request) bool {
-	required := config.Load().ServerAPIKey
+	required := config.GlobalServerAPIKey()
 	if required == "" {
 		return true
 	}
@@ -25,7 +28,7 @@ func openaiModels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "无效的 API Key")
 		return
 	}
-	cfg := config.Load()
+	cfg := config.LoadForUser(adminID())
 	model := cfg.Model
 	if model == "" {
 		model = "gpt-image-2"
@@ -57,7 +60,8 @@ func openaiGenerations(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "缺少 prompt")
 		return
 	}
-	cfg := config.Load()
+	aid := adminID()
+	cfg := config.LoadForUser(aid)
 	n := payload.N
 	if n < 1 {
 		n = 1
@@ -66,7 +70,7 @@ func openaiGenerations(w http.ResponseWriter, r *http.Request) {
 	size := orStr(payload.Size, cfg.DefaultSize)
 	quality := orStr(payload.Quality, cfg.DefaultQuality)
 	results, err := generator.Generate(r.Context(), generator.Params{
-		Prompt: payload.Prompt, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey,
+		UserID: aid, Prompt: payload.Prompt, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey,
 		Model: model, Size: size, Quality: quality, N: n, Timeout: cfg.Timeout,
 	})
 	if err != nil {
@@ -77,7 +81,7 @@ func openaiGenerations(w http.ResponseWriter, r *http.Request) {
 	for _, r := range results {
 		files = append(files, r.Filename)
 	}
-	store.AddHistory("api", payload.Prompt, model, size, quality, len(results), files)
+	store.AddHistory(aid, "api", payload.Prompt, model, size, quality, len(results), files)
 
 	respFormat := orStr(payload.ResponseFormat, "b64_json")
 	data := make([]map[string]any, 0, len(results))

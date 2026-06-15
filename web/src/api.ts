@@ -1,6 +1,7 @@
 import type {
   Config,
   Favorite,
+  GlobalSettings,
   HistoryItem,
   MarketItem,
   Profile,
@@ -8,6 +9,7 @@ import type {
   RequestLogMeta,
   StressStatus,
   Task,
+  User,
 } from './types'
 
 async function req<T>(url: string, opts?: RequestInit): Promise<T> {
@@ -30,9 +32,26 @@ function jsonBody(body: unknown): RequestInit {
 
 export const api = {
   // ---- 认证 ----
-  authStatus: () => req<{ authed: boolean; required: boolean }>('/api/auth/status'),
-  login: (password: string) => req<{ ok: boolean }>('/api/login', jsonBody({ password })),
+  authStatus: () => req<{ authed: boolean; required: boolean; user?: User }>('/api/auth/status'),
+  captcha: () => req<{ id: string; image: string }>('/api/captcha'),
+  login: (username: string, password: string, captchaId: string, captcha: string) =>
+    req<{ ok: boolean; user: User }>(
+      '/api/login',
+      jsonBody({ username, password, captcha_id: captchaId, captcha }),
+    ),
   logout: () => req<{ ok: boolean }>('/api/logout', { method: 'POST' }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    req<{ ok: boolean }>('/api/password', jsonBody({ old_password: oldPassword, new_password: newPassword })),
+
+  // ---- 用户管理 / 全局设置(管理员) ----
+  listUsers: () => req<{ users: User[] }>('/api/users'),
+  createUser: (body: { username: string; password: string; role: string; image_limit: number }) =>
+    req<{ ok: boolean; user: User }>('/api/users', jsonBody(body)),
+  updateUser: (id: number, body: Record<string, unknown>) =>
+    req<{ ok: boolean; user: User }>(`/api/users/${id}`, jsonBody(body)),
+  deleteUser: (id: number) => req<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
+  getSettings: () => req<GlobalSettings>('/api/settings'),
+  setSettings: (body: Record<string, unknown>) => req<{ ok: boolean }>('/api/settings', jsonBody(body)),
 
   // ---- 配置 / profile ----
   getConfig: () => req<Config>('/api/config'),
@@ -49,13 +68,14 @@ export const api = {
     req<{ tasks: { id: string; status: string }[] }>('/api/generate', jsonBody(body)),
   edit: (form: FormData) =>
     req<{ images: { filename: string; url: string }[] }>('/api/edit', { method: 'POST', body: form }),
-  listTasks: () => req<{ tasks: Task[] }>('/api/tasks'),
-  clearTasks: () => req<{ ok: boolean; removed: number }>('/api/tasks', { method: 'DELETE' }),
+  listTasks: (all = false) => req<{ tasks: Task[] }>(`/api/tasks${all ? '?all=true' : ''}`),
+  clearTasks: (all = false) =>
+    req<{ ok: boolean; removed: number }>(`/api/tasks${all ? '?all=true' : ''}`, { method: 'DELETE' }),
   reversePrompt: (form: FormData) =>
     req<{ prompt: string }>('/api/reverse-prompt', { method: 'POST', body: form }),
 
   // ---- 历史 / 收藏 ----
-  listHistory: () => req<{ history: HistoryItem[] }>('/api/history'),
+  listHistory: (all = false) => req<{ history: HistoryItem[] }>(`/api/history${all ? '?all=true' : ''}`),
   deleteHistory: (id: number) => req<{ ok: boolean }>(`/api/history/${id}`, { method: 'DELETE' }),
   clearHistory: () => req<{ ok: boolean }>('/api/history', { method: 'DELETE' }),
   listFavorites: () => req<{ favorites: Favorite[] }>('/api/favorites'),
@@ -76,9 +96,11 @@ export const api = {
   stressStop: () => req<{ ok: boolean }>('/api/stress/stop', { method: 'POST' }),
 
   // ---- 请求日志(200 无图) ----
-  requestLogs: () => req<{ logs: RequestLogMeta[] }>('/api/request-logs'),
+  requestLogs: (all = false) =>
+    req<{ logs: RequestLogMeta[] }>(`/api/request-logs${all ? '?all=true' : ''}`),
   requestLog: (id: number) => req<{ log: RequestLog }>(`/api/request-logs/${id}`),
-  clearRequestLogs: () => req<{ ok: boolean }>('/api/request-logs', { method: 'DELETE' }),
+  clearRequestLogs: (all = false) =>
+    req<{ ok: boolean }>(`/api/request-logs${all ? '?all=true' : ''}`, { method: 'DELETE' }),
 }
 
 export const SIZE_MATRIX: Record<string, Record<string, string>> = {

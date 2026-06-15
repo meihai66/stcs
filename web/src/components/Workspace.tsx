@@ -11,6 +11,7 @@ const ST: Record<string, { label: string; cls: string }> = {
 interface Props {
   tasks: Task[]
   history: HistoryItem[]
+  showOwner?: boolean
   onLightbox: (url: string) => void
   onContinue: (filename: string) => void
   onReuse: (prompt: string) => void
@@ -31,11 +32,11 @@ export default function Workspace(p: Props) {
         <button className="btn btn-ghost !px-2.5 !py-1 text-xs" onClick={p.onRefreshTasks}>
           <RefreshCw size={13} /> 刷新
         </button>
-        {p.tasks.some((t) => t.status === 'done' || t.status === 'error') && (
+        {!p.showOwner && p.tasks.some((t) => t.status === 'done' || t.status === 'error') && (
           <button
             className="btn btn-ghost !px-2.5 !py-1 text-xs hover:!border-rose-500 hover:!text-rose-400"
             onClick={() => {
-              if (window.confirm('清理所有已完成/失败的任务?(排队中、生成中的保留)')) p.onClearTasks()
+              if (window.confirm('清理我所有已完成/失败的任务?(排队中、生成中的保留)')) p.onClearTasks()
             }}
           >
             <Trash2 size={13} /> 清理已完成
@@ -47,7 +48,7 @@ export default function Workspace(p: Props) {
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {p.tasks.map((t) => (
-            <TaskCard key={t.id} t={t} onLightbox={p.onLightbox} />
+            <TaskCard key={t.id} t={t} showOwner={p.showOwner} onLightbox={p.onLightbox} />
           ))}
         </div>
       )}
@@ -57,11 +58,11 @@ export default function Workspace(p: Props) {
         <div className="sec-title flex-1">
           历史记录<span className="ln" />
         </div>
-        {p.history.length > 0 && (
+        {!p.showOwner && p.history.length > 0 && (
           <button
             className="btn btn-ghost !px-2.5 !py-1 text-xs hover:!border-rose-500 hover:!text-rose-400"
             onClick={() => {
-              if (window.confirm('清空全部历史记录?(已生成的图片文件保留)')) p.onClearHistory()
+              if (window.confirm('清空我的全部历史记录?(已生成的图片文件保留)')) p.onClearHistory()
             }}
           >
             <Trash2 size={13} /> 清空历史
@@ -94,6 +95,9 @@ export default function Workspace(p: Props) {
                   {h.prompt || '(无提示词)'}
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+                  {p.showOwner && h.username && (
+                    <span className="rounded bg-brand-500/20 px-1.5 py-0.5 text-brand-400">{h.username}</span>
+                  )}
                   <span>{new Date(h.created_at * 1000).toLocaleString('zh-CN')}</span>
                   {[h.mode, h.size, h.quality, h.model].filter(Boolean).map((v, i) => (
                     <span key={i} className="break-all rounded bg-[var(--color-ink-800)] px-1.5 py-0.5">
@@ -129,7 +133,7 @@ export default function Workspace(p: Props) {
   )
 }
 
-function TaskCard({ t, onLightbox }: { t: Task; onLightbox: (u: string) => void }) {
+function TaskCard({ t, showOwner, onLightbox }: { t: Task; showOwner?: boolean; onLightbox: (u: string) => void }) {
   const st = ST[t.status] || { label: t.status, cls: 'bg-slate-700/40 text-slate-300' }
   const elapsed =
     t.status === 'running' && t.started_at
@@ -148,6 +152,9 @@ function TaskCard({ t, onLightbox }: { t: Task; onLightbox: (u: string) => void 
         </span>
       </div>
       <div className="mt-1.5 text-[11px] text-slate-500">
+        {showOwner && t.username && (
+          <span className="mr-1.5 rounded bg-brand-500/20 px-1.5 py-0.5 text-brand-400">{t.username}</span>
+        )}
         {t.request_format === 'chat' ? 'chat' : 'images'} · {t.size} · {t.quality} · n={t.n} · {t.model}
       </div>
       {t.error && (

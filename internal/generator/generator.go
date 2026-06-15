@@ -143,9 +143,21 @@ func doPost(ctx context.Context, endpoint, contentType string, body io.Reader, h
 	return resp.StatusCode, data, nil
 }
 
-func savePNG(data []byte) (string, error) {
+// UserDir 返回某用户的图片目录(outputs/<uid>),并确保存在。
+func UserDir(userID int64) string {
+	d := filepath.Join(outputDir, strconv.FormatInt(userID, 10))
+	_ = os.MkdirAll(d, 0o755)
+	return d
+}
+
+// imageURL 拼出某用户某文件的访问地址。
+func imageURL(userID int64, name string) string {
+	return "/outputs/" + strconv.FormatInt(userID, 10) + "/" + name
+}
+
+func savePNG(userID int64, data []byte) (string, error) {
 	name := fmt.Sprintf("%s-%s.png", time.Now().Format("20060102-150405"), randHex(4))
-	if err := os.WriteFile(filepath.Join(outputDir, name), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(UserDir(userID), name), data, 0o644); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -163,7 +175,7 @@ type genItem struct {
 	URL     string `json:"url"`
 }
 
-func normalizeItems(ctx context.Context, items []genItem) ([]Result, error) {
+func normalizeItems(ctx context.Context, userID int64, items []genItem) ([]Result, error) {
 	var out []Result
 	for _, it := range items {
 		var raw []byte
@@ -183,13 +195,13 @@ func normalizeItems(ctx context.Context, items []genItem) ([]Result, error) {
 		if raw == nil {
 			continue
 		}
-		name, err := savePNG(raw)
+		name, err := savePNG(userID, raw)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, Result{
 			Filename: name,
-			URL:      "/outputs/" + name,
+			URL:      imageURL(userID, name),
 			B64JSON:  base64.StdEncoding.EncodeToString(raw),
 		})
 	}
@@ -223,6 +235,7 @@ func fetchImage(ctx context.Context, u string) ([]byte, error) {
 
 // Params 是一次文生图/对话生图的参数。
 type Params struct {
+	UserID   int64
 	Prompt   string
 	BaseURL  string
 	APIKey   string
@@ -265,14 +278,14 @@ func Generate(ctx context.Context, p Params) ([]Result, error) {
 		reason = "200 但响应非 JSON"
 	} else if len(parsed.Data) == 0 {
 		reason = "200 但响应 data 为空"
-	} else if results, err = normalizeItems(ctx, parsed.Data); err != nil {
+	} else if results, err = normalizeItems(ctx, p.UserID, parsed.Data); err != nil {
 		return nil, err
 	} else if len(results) == 0 {
 		reason = "200 但 data 里没有可解析的图片(无 b64_json / url)"
 	}
 	if reason != "" {
 		req, _ := json.Marshal(payload)
-		reqlog.Add("images", endpoint, p.Model, string(req), string(body), reason, status)
+		reqlog.Add(p.UserID, "images", endpoint, p.Model, string(req), string(body), reason, status)
 	}
 	return results, nil
 }
@@ -345,7 +358,7 @@ type chatResp struct {
 	} `json:"choices"`
 }
 
-func extractImagesFromChat(ctx context.Context, body []byte) ([]Result, error) {
+func extractImagesFromChat(ctx context.Context, userID int64, body []byte) ([]Result, error) {
 	var cr chatResp
 	if err := json.Unmarshal(body, &cr); err != nil {
 		return nil, nil
@@ -387,11 +400,11 @@ func extractImagesFromChat(ctx context.Context, body []byte) ([]Result, error) {
 		if err != nil || raw == nil {
 			continue
 		}
-		name, err := savePNG(raw)
+		name, err := savePNG(userID, raw)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Result{Filename: name, URL: "/outputs/" + name, B64JSON: base64.StdEncoding.EncodeToString(raw)})
+		out = append(out, Result{Filename: name, URL: imageURL(userID, name), B64JSON: base64.StdEncoding.EncodeToString(raw)})
 	}
 	return out, nil
 }
@@ -444,14 +457,14 @@ func GenerateViaChat(ctx context.Context, p Params) ([]Result, error) {
 		if status != 200 {
 			return nil, genErr("%s", extractError(status, body, nil))
 		}
-		imgs, err := extractImagesFromChat(ctx, body)
+		imgs, err := extractImagesFromChat(ctx, p.UserID, body)
 		if err != nil {
 			return nil, err
 		}
 		// 只要 200 就算成功;这一轮没抽到图就记日志,继续下一轮。
 		if len(imgs) == 0 {
 			req, _ := json.Marshal(payload)
-			reqlog.Add("chat", endpoint, p.Model, string(req), string(body),
+			reqlog.Add(p.UserID, "chat", endpoint, p.Model, string(req), string(body),
 				"200 但对话响应中没有图片(可能该模型/中转站不支持对话生图)", status)
 			continue
 		}
@@ -462,19 +475,19 @@ func GenerateViaChat(ctx context.Context, p Params) ([]Result, error) {
 
 // ParseImagesBody 解析 /v1/images/generations 风格的 200 响应,把其中的图片
 // 保存到 outputs/ 并返回结果(供压测「保存图片」复用)。
-func ParseImagesBody(ctx context.Context, body []byte) ([]Result, error) {
+func ParseImagesBody(ctx context.Context, userID int64, body []byte) ([]Result, error) {
 	var parsed struct {
 		Data []genItem `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Data) == 0 {
 		return nil, nil
 	}
-	return normalizeItems(ctx, parsed.Data)
+	return normalizeItems(ctx, userID, parsed.Data)
 }
 
 // ParseChatBody 解析 /v1/chat/completions 响应里的图片并保存到 outputs/(供压测复用)。
-func ParseChatBody(ctx context.Context, body []byte) ([]Result, error) {
-	return extractImagesFromChat(ctx, body)
+func ParseChatBody(ctx context.Context, userID int64, body []byte) ([]Result, error) {
+	return extractImagesFromChat(ctx, userID, body)
 }
 
 // EditFile 是一张待编辑/参考的图片。
@@ -525,7 +538,7 @@ func Edit(ctx context.Context, prompt string, images []EditFile, p Params) ([]Re
 	reason := ""
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		reason = "200 但响应非 JSON"
-	} else if results, err = normalizeItems(ctx, parsed.Data); err != nil {
+	} else if results, err = normalizeItems(ctx, p.UserID, parsed.Data); err != nil {
 		return nil, err
 	} else if len(results) == 0 {
 		reason = "200 但编辑接口未返回可解析的图片"
@@ -533,7 +546,7 @@ func Edit(ctx context.Context, prompt string, images []EditFile, p Params) ([]Re
 	if reason != "" {
 		req := fmt.Sprintf(`{"model":%q,"prompt":%q,"n":%d,"size":%q,"images":%d}`,
 			p.Model, prompt, p.N, p.Size, len(images))
-		reqlog.Add("edit", endpoint, p.Model, req, string(body), reason, status)
+		reqlog.Add(p.UserID, "edit", endpoint, p.Model, req, string(body), reason, status)
 	}
 	return results, nil
 }

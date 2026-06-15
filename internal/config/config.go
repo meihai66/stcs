@@ -1,21 +1,20 @@
-// Package config 负责读写配置:支持多套「中转站 profile」,可保存多个、随时切换。
+// Package config 负责读写「每个用户」的中转站配置(多套 profile,可切换)。
 //
-// config.json 结构与原 Python 版保持兼容:
+// 配置以 JSON 存在 users.config 列(经 store 读写),结构:
 //
-//	{
-//	  "profiles": [ {"name","base_url","api_key","model","reverse_model","request_format"}, ... ],
-//	  "active_profile": "...",
-//	  "default_size","default_quality","timeout","concurrency","server_api_key"
-//	}
+//	{ "profiles":[{name,base_url,api_key,model,reverse_model,request_format}],
+//	  "active_profile","default_size","default_quality","timeout" }
 //
-// Load() 返回「扁平」配置(全局项 + 当前激活 profile 的字段),供 generator/tasks/stress 直接使用。
+// 全局项(worker 并发数、对外 API 的 server_api_key)放在 settings 表,管理员统一设。
 package config
 
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
+	"strconv"
 	"sync"
+
+	"github.com/meihai66/stcs/internal/store"
 )
 
 // Profile 是一套中转站独有的配置。
@@ -28,18 +27,19 @@ type Profile struct {
 	RequestFormat string `json:"request_format"`
 }
 
-// raw 是磁盘上 config.json 的完整结构。
+// raw 是某用户配置 JSON 的完整结构。
 type raw struct {
-	Profiles      []Profile `json:"profiles"`
-	ActiveProfile string    `json:"active_profile"`
-	DefaultSize   string    `json:"default_size"`
-	DefaultQuality string   `json:"default_quality"`
-	Timeout       int       `json:"timeout"`
-	Concurrency   int       `json:"concurrency"`
-	ServerAPIKey  string    `json:"server_api_key"`
+	Profiles       []Profile `json:"profiles"`
+	ActiveProfile  string    `json:"active_profile"`
+	DefaultSize    string    `json:"default_size"`
+	DefaultQuality string    `json:"default_quality"`
+	Timeout        int       `json:"timeout"`
+	// 兼容旧全局 config.json 迁移而来的字段(读时容忍,不再写出)
+	Concurrency  int    `json:"concurrency,omitempty"`
+	ServerAPIKey string `json:"server_api_key,omitempty"`
 }
 
-// Flat 是扁平化后的配置(全局项 + 当前 profile 字段),业务层只认这个。
+// Flat 是扁平化后的配置,业务层只认这个。
 type Flat struct {
 	BaseURL        string
 	APIKey         string
@@ -59,26 +59,16 @@ var profileDefaults = Profile{
 	ReverseModel: "gpt-4o", RequestFormat: "images",
 }
 
-var (
-	mu   sync.Mutex
-	path string
-)
+var mu sync.Mutex
 
-// Init 设定 config.json 路径。须在使用前调用一次。
-func Init(configPath string) {
-	path = configPath
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-}
-
-func readRaw() raw {
+func readRaw(userID int64) raw {
 	var r raw
-	if b, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(b, &r)
+	if s := store.GetUserConfig(userID); s != "" {
+		_ = json.Unmarshal([]byte(s), &r)
 	}
 	if r.Profiles == nil {
 		r.Profiles = []Profile{}
 	}
-	// 全局默认
 	if r.DefaultSize == "" {
 		r.DefaultSize = "1024x1024"
 	}
@@ -88,21 +78,16 @@ func readRaw() raw {
 	if r.Timeout == 0 {
 		r.Timeout = 300
 	}
-	if r.Concurrency == 0 {
-		r.Concurrency = 3
-	}
 	if r.ActiveProfile == "" && len(r.Profiles) > 0 {
 		r.ActiveProfile = r.Profiles[0].Name
 	}
 	return r
 }
 
-func writeRaw(r raw) error {
-	b, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o644)
+func writeRaw(userID int64, r raw) {
+	r.Concurrency, r.ServerAPIKey = 0, "" // 旧字段不再写出
+	b, _ := json.Marshal(r)
+	store.SetUserConfig(userID, string(b))
 }
 
 func activeProfile(r raw) Profile {
@@ -126,11 +111,45 @@ func env(keys ...string) string {
 	return ""
 }
 
-// Load 返回扁平配置;环境变量优先(部署用)。
-func Load() Flat {
+// ----------------------------- 全局项 -----------------------------
+
+// GlobalConcurrency 返回任务 worker 并发数(全局,管理员设;env 优先;默认 3)。
+func GlobalConcurrency() int {
+	if v := env("STCS_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	n, _ := strconv.Atoi(store.GetSetting("concurrency", ""))
+	if n <= 0 {
+		n = 3
+	}
+	return n
+}
+
+// GlobalServerAPIKey 返回对外 OpenAI 兼容 API 的密钥(全局;env 优先)。
+func GlobalServerAPIKey() string {
+	if v := env("STCS_SERVER_API_KEY", "GPTIMG_SERVER_API_KEY"); v != "" {
+		return v
+	}
+	return store.GetSetting("server_api_key", "")
+}
+
+// SetGlobalConcurrency / SetGlobalServerAPIKey 由管理员设置入口调用。
+func SetGlobalConcurrency(n int) {
+	if n > 0 {
+		store.SetSetting("concurrency", strconv.Itoa(n))
+	}
+}
+func SetGlobalServerAPIKey(k string) { store.SetSetting("server_api_key", k) }
+
+// ----------------------------- 每用户配置 -----------------------------
+
+// LoadForUser 返回某用户的扁平配置(中转站来自其激活 profile;并发/对外密钥来自全局)。
+func LoadForUser(userID int64) Flat {
 	mu.Lock()
 	defer mu.Unlock()
-	r := readRaw()
+	r := readRaw(userID)
 	p := activeProfile(r)
 	f := Flat{
 		BaseURL:        p.BaseURL,
@@ -141,11 +160,11 @@ func Load() Flat {
 		DefaultSize:    r.DefaultSize,
 		DefaultQuality: r.DefaultQuality,
 		Timeout:        r.Timeout,
-		Concurrency:    r.Concurrency,
-		ServerAPIKey:   r.ServerAPIKey,
 		ActiveProfile:  r.ActiveProfile,
+		Concurrency:    GlobalConcurrency(),
+		ServerAPIKey:   GlobalServerAPIKey(),
 	}
-	// 环境变量覆盖(同时兼容旧 GPTIMG_ 前缀)
+	// 环境变量覆盖(部署用,作用于所有用户)
 	if v := env("STCS_BASE_URL", "GPTIMG_BASE_URL"); v != "" {
 		f.BaseURL = v
 	}
@@ -155,61 +174,45 @@ func Load() Flat {
 	if v := env("STCS_MODEL", "GPTIMG_MODEL"); v != "" {
 		f.Model = v
 	}
-	if v := env("STCS_SERVER_API_KEY", "GPTIMG_SERVER_API_KEY"); v != "" {
-		f.ServerAPIKey = v
-	}
 	return f
 }
 
-func orDefault(v, d string) string {
-	if v == "" {
-		return d
-	}
-	return v
-}
-
-// SaveGlobal 保存全局项;中转站字段(若给出)写入当前激活 profile(无则建「默认」)。
-func SaveGlobal(updates map[string]any) Flat {
+// SaveGlobalForUser 保存某用户的非中转站全局项(尺寸/质量/超时)。
+func SaveGlobalForUser(userID int64, updates map[string]any) Flat {
 	mu.Lock()
-	r := readRaw()
+	r := readRaw(userID)
 	if v, ok := updates["default_quality"].(string); ok && v != "" {
 		r.DefaultQuality = v
-	}
-	if v, ok := toInt(updates["timeout"]); ok && v > 0 {
-		r.Timeout = v
-	}
-	if v, ok := toInt(updates["concurrency"]); ok && v > 0 {
-		r.Concurrency = v
-	}
-	if v, ok := updates["server_api_key"].(string); ok && v != "" && !isMasked(v) {
-		r.ServerAPIKey = v
 	}
 	if v, ok := updates["default_size"].(string); ok && v != "" {
 		r.DefaultSize = v
 	}
-	_ = writeRaw(r)
+	if v, ok := toInt(updates["timeout"]); ok && v > 0 {
+		r.Timeout = v
+	}
+	writeRaw(userID, r)
 	mu.Unlock()
-	return Load()
+	return LoadForUser(userID)
 }
 
-// ListProfiles 返回所有 profile 与当前激活名。
-func ListProfiles() ([]Profile, string) {
+// ListProfilesForUser 返回某用户的所有 profile 与激活名。
+func ListProfilesForUser(userID int64) ([]Profile, string) {
 	mu.Lock()
 	defer mu.Unlock()
-	r := readRaw()
+	r := readRaw(userID)
 	out := make([]Profile, len(r.Profiles))
 	copy(out, r.Profiles)
 	return out, r.ActiveProfile
 }
 
-// SaveProfile 新增或按 name 更新一套配置。api_key 为空或脱敏占位符时不覆盖原值。
-func SaveProfile(in Profile) error {
+// SaveProfileForUser 新增或按 name 更新某用户的一套配置。api_key 空或脱敏占位时不覆盖。
+func SaveProfileForUser(userID int64, in Profile) error {
 	if in.Name == "" {
 		return ErrEmptyName
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	r := readRaw()
+	r := readRaw(userID)
 	var prof *Profile
 	for i := range r.Profiles {
 		if r.Profiles[i].Name == in.Name {
@@ -241,14 +244,15 @@ func SaveProfile(in Profile) error {
 	if r.ActiveProfile == "" {
 		r.ActiveProfile = in.Name
 	}
-	return writeRaw(r)
+	writeRaw(userID, r)
+	return nil
 }
 
-// DeleteProfile 删除一套配置。
-func DeleteProfile(name string) {
+// DeleteProfileForUser 删除某用户的一套配置。
+func DeleteProfileForUser(userID int64, name string) {
 	mu.Lock()
 	defer mu.Unlock()
-	r := readRaw()
+	r := readRaw(userID)
 	kept := r.Profiles[:0]
 	for _, p := range r.Profiles {
 		if p.Name != name {
@@ -263,21 +267,28 @@ func DeleteProfile(name string) {
 			r.ActiveProfile = ""
 		}
 	}
-	_ = writeRaw(r)
+	writeRaw(userID, r)
 }
 
-// SetActive 切换当前激活配置。
-func SetActive(name string) {
+// SetActiveForUser 切换某用户的激活配置。
+func SetActiveForUser(userID int64, name string) {
 	mu.Lock()
 	defer mu.Unlock()
-	r := readRaw()
+	r := readRaw(userID)
 	for _, p := range r.Profiles {
 		if p.Name == name {
 			r.ActiveProfile = name
-			_ = writeRaw(r)
+			writeRaw(userID, r)
 			return
 		}
 	}
+}
+
+func orDefault(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
 }
 
 func isMasked(s string) bool {

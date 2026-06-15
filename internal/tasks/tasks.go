@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +21,8 @@ const maxKeep = 100
 // Task 是一个文生图任务。
 type Task struct {
 	ID            string           `json:"id"`
+	UserID        int64            `json:"user_id"`
+	Username      string           `json:"username,omitempty"` // 仅管理员「查看全部」时填充
 	Mode          string           `json:"mode"`
 	Status        string           `json:"status"` // queued|running|done|error
 	Prompt        string           `json:"prompt"`
@@ -50,7 +54,7 @@ func Start() {
 	if started {
 		return
 	}
-	c := config.Load().Concurrency
+	c := config.GlobalConcurrency()
 	if c < 1 {
 		c = 1
 	}
@@ -81,10 +85,11 @@ func randID() string {
 }
 
 // Enqueue 加入一个文生图任务,返回任务快照。
-func Enqueue(prompt, size, quality, model, requestFormat string, n int) Task {
+func Enqueue(userID int64, prompt, size, quality, model, requestFormat string, n int) Task {
 	mu.Lock()
 	t := &Task{
 		ID:            randID(),
+		UserID:        userID,
 		Mode:          "gen",
 		Status:        "queued",
 		Prompt:        prompt,
@@ -130,32 +135,31 @@ func Get(id string) (Task, bool) {
 	return *t, true
 }
 
-// List 倒序返回最近的任务快照。
-func List(limit int) []Task {
+// List 倒序返回最近的任务快照。all=true(管理员)返回全部用户,否则只返回 userID 的。
+func List(userID int64, all bool, limit int) []Task {
 	mu.Lock()
 	defer mu.Unlock()
-	start := 0
-	if len(order) > limit {
-		start = len(order) - limit
-	}
-	slice := order[start:]
-	out := make([]Task, 0, len(slice))
-	for i := len(slice) - 1; i >= 0; i-- {
-		if t := tasks[slice[i]]; t != nil {
-			out = append(out, *t)
+	out := make([]Task, 0, limit)
+	for i := len(order) - 1; i >= 0 && len(out) < limit; i-- {
+		t := tasks[order[i]]
+		if t == nil || (!all && t.UserID != userID) {
+			continue
 		}
+		out = append(out, *t)
 	}
 	return out
 }
 
-// Clear 清理所有已结束(done/error)的任务,保留排队中/生成中的,返回清理数量。
-func Clear() int {
+// Clear 清理已结束(done/error)的任务,保留排队中/生成中的,返回清理数量。
+// all=true(管理员)清全部用户,否则只清 userID 的。
+func Clear(userID int64, all bool) int {
 	mu.Lock()
 	defer mu.Unlock()
 	kept := make([]string, 0, len(order))
 	removed := 0
 	for _, id := range order {
-		if t := tasks[id]; t != nil && (t.Status == "done" || t.Status == "error") {
+		t := tasks[id]
+		if t != nil && (all || t.UserID == userID) && (t.Status == "done" || t.Status == "error") {
 			delete(tasks, id)
 			removed++
 			continue
@@ -210,7 +214,7 @@ func runOne(id string) {
 
 	setStatus(id, "running", "", nil, true, false)
 
-	cfg := config.Load()
+	cfg := config.LoadForUser(snap.UserID)
 	fmtMode := snap.RequestFormat
 	if fmtMode == "" {
 		fmtMode = cfg.RequestFormat
@@ -228,6 +232,7 @@ func runOne(id string) {
 		quality = cfg.DefaultQuality
 	}
 	p := generator.Params{
+		UserID:  snap.UserID,
 		Prompt:  snap.Prompt,
 		BaseURL: cfg.BaseURL,
 		APIKey:  cfg.APIKey,
@@ -260,5 +265,17 @@ func runOne(id string) {
 		files = append(files, r.Filename)
 	}
 	setStatus(id, "done", "", imgs, false, true)
-	store.AddHistory("gen", snap.Prompt, model, snap.Size, snap.Quality, snap.N, files)
+	store.AddHistory(snap.UserID, "gen", snap.Prompt, model, size, quality, snap.N, files)
+	pruneUserImages(snap.UserID)
+}
+
+// pruneUserImages 按用户图片上限裁掉最旧历史,并从磁盘删除对应文件。
+func pruneUserImages(userID int64) {
+	u, ok := store.GetUser(userID)
+	if !ok || u.ImageLimit <= 0 {
+		return
+	}
+	for _, f := range store.PruneUserImages(userID, u.ImageLimit) {
+		_ = os.Remove(filepath.Join(generator.UserDir(userID), filepath.Base(f)))
+	}
 }

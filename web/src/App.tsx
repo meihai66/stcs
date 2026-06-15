@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, LogOut, Moon, ScrollText, Settings, ShoppingBag, Sparkles, Star, Sun, Zap } from 'lucide-react'
+import { Download, LogOut, Moon, ScrollText, Settings, ShoppingBag, Sparkles, Star, Sun, Users, Zap } from 'lucide-react'
 import { api } from './api'
 import type { Config, HistoryItem, Mode, Profile, Task } from './types'
 import LoginGate from './components/LoginGate'
@@ -10,6 +10,7 @@ import FavoritesModal from './components/FavoritesModal'
 import MarketModal from './components/MarketModal'
 import StressModal from './components/StressModal'
 import RequestLogsModal from './components/RequestLogsModal'
+import UsersModal from './components/UsersModal'
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
@@ -24,11 +25,14 @@ export default function App() {
   const [editSources, setEditSources] = useState<string[]>([])
 
   const [lightbox, setLightbox] = useState<string | null>(null)
-  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress' | 'logs'>('')
+  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress' | 'logs' | 'users'>('')
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('stcs-theme') === 'light' ? 'light' : 'dark'),
   )
+  const [viewAll, setViewAll] = useState(false)
+  const viewAllRef = useRef(false)
   const lastActive = useRef(0)
+  const isAdmin = config?.role === 'admin'
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', theme === 'light')
@@ -44,8 +48,19 @@ export default function App() {
     return cfg
   }, [])
 
-  const loadTasks = useCallback(async () => setTasks((await api.listTasks()).tasks), [])
-  const loadHistory = useCallback(async () => setHistory((await api.listHistory()).history), [])
+  const loadTasks = useCallback(async () => setTasks((await api.listTasks(viewAllRef.current)).tasks), [])
+  const loadHistory = useCallback(
+    async () => setHistory((await api.listHistory(viewAllRef.current)).history),
+    [],
+  )
+
+  function toggleViewAll() {
+    const v = !viewAll
+    setViewAll(v)
+    viewAllRef.current = v
+    loadTasks()
+    loadHistory()
+  }
 
   // 初始:检查登录态
   useEffect(() => {
@@ -72,7 +87,7 @@ export default function App() {
     if (!authed) return
     const id = setInterval(async () => {
       try {
-        const { tasks } = await api.listTasks()
+        const { tasks } = await api.listTasks(viewAllRef.current)
         setTasks(tasks)
         const act = tasks.filter((t) => t.status === 'queued' || t.status === 'running').length
         if (lastActive.current > 0 && act < lastActive.current) loadHistory()
@@ -128,10 +143,24 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-[15px] font-bold leading-none text-slate-100">STCS 生图压测台</h1>
-            <span className="text-[11px] text-slate-500">{config.model || '未配置模型'}</span>
+            <span className="text-[11px] text-slate-500">
+              {config.username}
+              {isAdmin && <span className="ml-1 rounded bg-brand-500/20 px-1 text-brand-400">管理员</span>}
+              {' · '}
+              {config.model || '未配置模型'}
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {isAdmin && (
+            <button
+              className={`btn btn-ghost !px-2.5 ${viewAll ? '!border-brand-500 !text-brand-400' : ''}`}
+              onClick={toggleViewAll}
+              title="切换:仅看自己 / 看全部用户的数据"
+            >
+              {viewAll ? '全部用户' : '仅我'}
+            </button>
+          )}
           <select
             className="field !w-auto !py-2 max-w-[180px] text-[13px] font-medium"
             value={active}
@@ -155,6 +184,11 @@ export default function App() {
           <button className="btn btn-ghost" onClick={() => setModal('favorites')}>
             <Star size={15} /> 模板
           </button>
+          {isAdmin && (
+            <button className="btn btn-ghost" onClick={() => setModal('users')}>
+              <Users size={15} /> 用户
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={() => setModal('settings')}>
             <Settings size={15} /> 设置
           </button>
@@ -188,6 +222,7 @@ export default function App() {
         <Workspace
           tasks={tasks}
           history={history}
+          showOwner={isAdmin && viewAll}
           onLightbox={setLightbox}
           onContinue={continueFrom}
           onReuse={(p) => { setPrompt(p); window.scrollTo(0, 0) }}
@@ -220,7 +255,8 @@ export default function App() {
         config={config}
         onLightbox={setLightbox}
       />
-      <RequestLogsModal open={modal === 'logs'} onClose={() => setModal('')} />
+      <RequestLogsModal open={modal === 'logs'} onClose={() => setModal('')} isAdmin={!!isAdmin} />
+      <UsersModal open={modal === 'users'} onClose={() => setModal('')} />
 
       {/* 灯箱 */}
       {lightbox && (

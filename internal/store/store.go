@@ -1,5 +1,7 @@
-// Package store 用 SQLite 持久化生图历史 + 提示词收藏。
+// Package store 用 SQLite 持久化用户、会话、生图历史、提示词收藏与全局设置。
 // 使用纯 Go 的 modernc.org/sqlite,无需 CGO,方便静态编译进 Docker。
+//
+// 多用户:history/favorites 均带 user_id,数据按用户隔离;管理员可跨用户查看。
 package store
 
 import (
@@ -12,8 +14,8 @@ import (
 )
 
 var (
-	db   *sql.DB
-	mu   sync.Mutex
+	db *sql.DB
+	mu sync.Mutex
 )
 
 // Image 是历史里一张图的引用。
@@ -25,6 +27,8 @@ type Image struct {
 // History 是一条生图历史。
 type History struct {
 	ID        int64    `json:"id"`
+	UserID    int64    `json:"user_id"`
+	Username  string   `json:"username,omitempty"` // 仅管理员「查看全部」时填充
 	CreatedAt int64    `json:"created_at"`
 	Mode      string   `json:"mode"`
 	Prompt    string   `json:"prompt"`
@@ -39,6 +43,7 @@ type History struct {
 // Favorite 是一条收藏的提示词。
 type Favorite struct {
 	ID        int64  `json:"id"`
+	UserID    int64  `json:"user_id"`
 	Name      string `json:"name"`
 	Prompt    string `json:"prompt"`
 	CreatedAt int64  `json:"created_at"`
@@ -58,28 +63,75 @@ func Init(dbPath string) error {
 			mode TEXT NOT NULL,
 			prompt TEXT NOT NULL,
 			model TEXT, size TEXT, quality TEXT, n INTEGER,
-			files TEXT
+			files TEXT,
+			user_id INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS favorites (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at INTEGER NOT NULL,
-			name TEXT, prompt TEXT NOT NULL
-		);`)
+			name TEXT, prompt TEXT NOT NULL,
+			user_id INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'user',
+			image_limit INTEGER NOT NULL DEFAULT 200,
+			config TEXT,
+			created_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS sessions (
+			token TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id);
+		CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);
+		CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at);
+	`)
 	if err != nil {
 		return err
 	}
 	db = d
+	// 兼容历史库:旧版表无 user_id 列时补上。
+	addColumnIfMissing("history", "user_id", "INTEGER NOT NULL DEFAULT 0")
+	addColumnIfMissing("favorites", "user_id", "INTEGER NOT NULL DEFAULT 0")
 	return nil
 }
 
+func addColumnIfMissing(table, col, decl string) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk) == nil && name == col {
+			return // 已存在
+		}
+	}
+	_, _ = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl)
+}
+
+// ----------------------------- 历史 -----------------------------
+
 // AddHistory 写入一条历史,返回新行 id。
-func AddHistory(mode, prompt, model, size, quality string, n int, files []string) int64 {
+func AddHistory(userID int64, mode, prompt, model, size, quality string, n int, files []string) int64 {
 	mu.Lock()
 	defer mu.Unlock()
 	fj, _ := json.Marshal(files)
 	res, err := db.Exec(
-		`INSERT INTO history (created_at, mode, prompt, model, size, quality, n, files) VALUES (?,?,?,?,?,?,?,?)`,
-		time.Now().Unix(), mode, prompt, model, size, quality, n, string(fj))
+		`INSERT INTO history (created_at, mode, prompt, model, size, quality, n, files, user_id) VALUES (?,?,?,?,?,?,?,?,?)`,
+		time.Now().Unix(), mode, prompt, model, size, quality, n, string(fj), userID)
 	if err != nil {
 		return 0
 	}
@@ -87,11 +139,25 @@ func AddHistory(mode, prompt, model, size, quality string, n int, files []string
 	return id
 }
 
-// ListHistory 倒序返回历史。
-func ListHistory(limit int) []History {
+// ListHistory 倒序返回某用户的历史。
+func ListHistory(userID int64, limit int) []History {
 	mu.Lock()
 	defer mu.Unlock()
-	rows, err := db.Query(`SELECT id, created_at, mode, prompt, model, size, quality, n, files FROM history ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT h.id, h.user_id, '', h.created_at, h.mode, h.prompt, h.model, h.size, h.quality, h.n, h.files
+		FROM history h WHERE h.user_id=? ORDER BY h.id DESC LIMIT ?`, userID, limit)
+	return scanHistory(rows, err)
+}
+
+// ListAllHistory 管理员视角:倒序返回全部用户历史(带用户名)。
+func ListAllHistory(limit int) []History {
+	mu.Lock()
+	defer mu.Unlock()
+	rows, err := db.Query(`SELECT h.id, h.user_id, COALESCE(u.username,''), h.created_at, h.mode, h.prompt, h.model, h.size, h.quality, h.n, h.files
+		FROM history h LEFT JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT ?`, limit)
+	return scanHistory(rows, err)
+}
+
+func scanHistory(rows *sql.Rows, err error) []History {
 	if err != nil {
 		return nil
 	}
@@ -99,65 +165,127 @@ func ListHistory(limit int) []History {
 	out := []History{}
 	for rows.Next() {
 		var h History
-		var filesJSON sql.NullString
-		var model, size, quality sql.NullString
-		if err := rows.Scan(&h.ID, &h.CreatedAt, &h.Mode, &h.Prompt, &model, &size, &quality, &h.N, &filesJSON); err != nil {
+		var filesJSON, model, size, quality, username sql.NullString
+		if err := rows.Scan(&h.ID, &h.UserID, &username, &h.CreatedAt, &h.Mode, &h.Prompt, &model, &size, &quality, &h.N, &filesJSON); err != nil {
 			continue
 		}
-		h.Model, h.Size, h.Quality = model.String, size.String, quality.String
+		h.Model, h.Size, h.Quality, h.Username = model.String, size.String, quality.String, username.String
 		h.Files = []string{}
 		if filesJSON.Valid {
 			_ = json.Unmarshal([]byte(filesJSON.String), &h.Files)
 		}
 		h.Images = make([]Image, 0, len(h.Files))
 		for _, f := range h.Files {
-			h.Images = append(h.Images, Image{Filename: f, URL: "/outputs/" + f})
+			h.Images = append(h.Images, Image{Filename: f, URL: imageURL(h.UserID, f)})
 		}
 		out = append(out, h)
 	}
 	return out
 }
 
-// DeleteHistory 删除一条历史,返回它关联的文件名(供调用方决定是否删盘上文件)。
-func DeleteHistory(id int64) []string {
+// imageURL 拼出某用户某文件的访问地址(/outputs/<uid>/<file>)。
+func imageURL(userID int64, file string) string {
+	return "/outputs/" + itoa64(userID) + "/" + file
+}
+
+// DeleteHistory 删除一条历史(校验归属;管理员可删任意),返回它关联的文件名与所属用户。
+func DeleteHistory(id, userID int64, isAdmin bool) (files []string, owner int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	var filesJSON sql.NullString
-	_ = db.QueryRow(`SELECT files FROM history WHERE id=?`, id).Scan(&filesJSON)
-	var files []string
+	if db.QueryRow(`SELECT user_id, files FROM history WHERE id=?`, id).Scan(&owner, &filesJSON) != nil {
+		return nil, 0
+	}
+	if !isAdmin && owner != userID {
+		return nil, 0 // 越权
+	}
 	if filesJSON.Valid {
 		_ = json.Unmarshal([]byte(filesJSON.String), &files)
 	}
 	_, _ = db.Exec(`DELETE FROM history WHERE id=?`, id)
-	return files
+	return files, owner
 }
 
-// ClearHistory 清空全部历史,返回所有关联文件名(供调用方决定是否删盘上文件)。
-func ClearHistory() []string {
+// ClearHistory 清空某用户的历史,返回其关联文件名。
+func ClearHistory(userID int64) []string {
 	mu.Lock()
 	defer mu.Unlock()
-	var all []string
-	if rows, err := db.Query(`SELECT files FROM history`); err == nil {
-		for rows.Next() {
-			var filesJSON sql.NullString
-			if rows.Scan(&filesJSON) == nil && filesJSON.Valid {
-				var files []string
-				if json.Unmarshal([]byte(filesJSON.String), &files) == nil {
-					all = append(all, files...)
-				}
-			}
-		}
-		rows.Close()
-	}
-	_, _ = db.Exec(`DELETE FROM history`)
+	all := collectFiles(`SELECT files FROM history WHERE user_id=?`, userID)
+	_, _ = db.Exec(`DELETE FROM history WHERE user_id=?`, userID)
 	return all
 }
 
-// AddFavorite 新增收藏,返回 id。
-func AddFavorite(prompt, name string) int64 {
+// PruneUserImages 把某用户的历史图片裁到 limit 张以内(删最旧的整条历史),
+// 返回被删掉的文件名供调用方从磁盘清理。limit<=0 表示不限制。
+func PruneUserImages(userID int64, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	res, err := db.Exec(`INSERT INTO favorites (created_at, name, prompt) VALUES (?,?,?)`, time.Now().Unix(), name, prompt)
+	rows, err := db.Query(`SELECT id, files FROM history WHERE user_id=? ORDER BY id ASC`, userID)
+	if err != nil {
+		return nil
+	}
+	type rec struct {
+		id    int64
+		files []string
+	}
+	var recs []rec
+	total := 0
+	for rows.Next() {
+		var id int64
+		var fj sql.NullString
+		if rows.Scan(&id, &fj) != nil {
+			continue
+		}
+		var files []string
+		if fj.Valid {
+			_ = json.Unmarshal([]byte(fj.String), &files)
+		}
+		recs = append(recs, rec{id, files})
+		total += len(files)
+	}
+	rows.Close()
+	var removed []string
+	for _, rc := range recs {
+		if total <= limit {
+			break
+		}
+		_, _ = db.Exec(`DELETE FROM history WHERE id=?`, rc.id)
+		removed = append(removed, rc.files...)
+		total -= len(rc.files)
+	}
+	return removed
+}
+
+func collectFiles(query string, args ...any) []string {
+	var all []string
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return all
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fj sql.NullString
+		if rows.Scan(&fj) == nil && fj.Valid {
+			var files []string
+			if json.Unmarshal([]byte(fj.String), &files) == nil {
+				all = append(all, files...)
+			}
+		}
+	}
+	return all
+}
+
+// ----------------------------- 收藏 -----------------------------
+
+// AddFavorite 新增收藏,返回 id。
+func AddFavorite(userID int64, prompt, name string) int64 {
+	mu.Lock()
+	defer mu.Unlock()
+	res, err := db.Exec(`INSERT INTO favorites (created_at, name, prompt, user_id) VALUES (?,?,?,?)`,
+		time.Now().Unix(), name, prompt, userID)
 	if err != nil {
 		return 0
 	}
@@ -165,11 +293,11 @@ func AddFavorite(prompt, name string) int64 {
 	return id
 }
 
-// ListFavorites 倒序返回收藏。
-func ListFavorites() []Favorite {
+// ListFavorites 倒序返回某用户的收藏。
+func ListFavorites(userID int64) []Favorite {
 	mu.Lock()
 	defer mu.Unlock()
-	rows, err := db.Query(`SELECT id, created_at, name, prompt FROM favorites ORDER BY id DESC`)
+	rows, err := db.Query(`SELECT id, user_id, created_at, name, prompt FROM favorites WHERE user_id=? ORDER BY id DESC`, userID)
 	if err != nil {
 		return nil
 	}
@@ -178,7 +306,7 @@ func ListFavorites() []Favorite {
 	for rows.Next() {
 		var f Favorite
 		var name sql.NullString
-		if err := rows.Scan(&f.ID, &f.CreatedAt, &name, &f.Prompt); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.CreatedAt, &name, &f.Prompt); err != nil {
 			continue
 		}
 		f.Name = name.String
@@ -187,9 +315,35 @@ func ListFavorites() []Favorite {
 	return out
 }
 
-// DeleteFavorite 删除一条收藏。
-func DeleteFavorite(id int64) {
+// DeleteFavorite 删除一条收藏(校验归属;管理员可删任意)。
+func DeleteFavorite(id, userID int64, isAdmin bool) {
 	mu.Lock()
 	defer mu.Unlock()
-	_, _ = db.Exec(`DELETE FROM favorites WHERE id=?`, id)
+	if isAdmin {
+		_, _ = db.Exec(`DELETE FROM favorites WHERE id=?`, id)
+		return
+	}
+	_, _ = db.Exec(`DELETE FROM favorites WHERE id=? AND user_id=?`, id, userID)
+}
+
+func itoa64(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	var b [20]byte
+	pos := len(b)
+	for v > 0 {
+		pos--
+		b[pos] = byte('0' + v%10)
+		v /= 10
+	}
+	if neg {
+		pos--
+		b[pos] = '-'
+	}
+	return string(b[pos:])
 }

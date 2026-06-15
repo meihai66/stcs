@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +28,7 @@ const maxSavedImages = 200
 
 type run struct {
 	mu          sync.Mutex
+	UserID      int64
 	Status      string // running|done|cancelled|error
 	Total       int
 	Concurrency int
@@ -68,6 +71,7 @@ func State() string {
 
 // StartParams 是一轮压测参数。
 type StartParams struct {
+	UserID      int64
 	Prompt      string
 	Total       int
 	Concurrency int
@@ -80,10 +84,11 @@ type StartParams struct {
 
 // Start 启动一轮压测(异步)。
 func Start(sp StartParams) {
-	cfg := config.Load()
+	cfg := config.LoadForUser(sp.UserID)
 	base, key := cfg.BaseURL, cfg.APIKey
 
 	r := &run{
+		UserID: sp.UserID,
 		Status: "running", Total: sp.Total, Concurrency: sp.Concurrency,
 		Model: sp.Model, Size: sp.Size, Fmt: sp.Fmt, saveImgs: sp.Save,
 		Errors: map[string]int{}, StartMono: time.Now(), StartedAt: time.Now().Unix(),
@@ -158,7 +163,7 @@ func Start(sp StartParams) {
 						save = len(r.Images) < maxSavedImages
 						r.mu.Unlock()
 					}
-					ok, lat, status, errLine, imgs := doOne(ctx, endpoint, body, headers, timeout, sp.Fmt, sp.Model, save)
+					ok, lat, status, errLine, imgs := doOne(ctx, sp.UserID, endpoint, body, headers, timeout, sp.Fmt, sp.Model, save)
 					r.mu.Lock()
 					r.Done++
 					r.Latencies = append(r.Latencies, lat)
@@ -197,7 +202,12 @@ func Start(sp StartParams) {
 		}
 		r.mu.Unlock()
 		if len(files) > 0 {
-			store.AddHistory("stress", sp.Prompt, sp.Model, sp.Size, sp.Quality, len(files), files)
+			store.AddHistory(sp.UserID, "stress", sp.Prompt, sp.Model, sp.Size, sp.Quality, len(files), files)
+			if u, ok := store.GetUser(sp.UserID); ok && u.ImageLimit > 0 {
+				for _, f := range store.PruneUserImages(sp.UserID, u.ImageLimit) {
+					_ = os.Remove(filepath.Join(generator.UserDir(sp.UserID), filepath.Base(f)))
+				}
+			}
 		}
 	}()
 }
@@ -205,7 +215,7 @@ func Start(sp StartParams) {
 // doOne 发一次压测请求。save 为 true 时完整读取响应并把图片落盘(imgs 返回保存结果);
 // 否则只读响应头部 64KB 判定成败、其余直接丢弃——b64 图片响应动辄数 MB,
 // 高并发下整体读进内存会把机器打爆(OOM 假死),这是压测「卡死」的主因之一。
-func doOne(ctx context.Context, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode, model string, save bool) (ok bool, latMs float64, status int, errLine string, imgs []generator.Result) {
+func doOne(ctx context.Context, userID int64, endpoint string, body []byte, headers map[string]string, timeout time.Duration, fmtMode, model string, save bool) (ok bool, latMs float64, status int, errLine string, imgs []generator.Result) {
 	start := time.Now()
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -242,12 +252,12 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 		lat := ms(start)
 		var results []generator.Result
 		if fmtMode == "chat" {
-			results, _ = generator.ParseChatBody(rctx, data)
+			results, _ = generator.ParseChatBody(rctx, userID, data)
 		} else {
-			results, _ = generator.ParseImagesBody(rctx, data)
+			results, _ = generator.ParseImagesBody(rctx, userID, data)
 		}
 		if len(results) == 0 {
-			reqlog.Add("stress", endpoint, model, string(body), string(data), "200 但未解析到图片", 200)
+			reqlog.Add(userID, "stress", endpoint, model, string(body), string(data), "200 但未解析到图片", 200)
 		}
 		return true, lat, 200, "", results
 	}
@@ -274,7 +284,7 @@ func doOne(ctx context.Context, endpoint string, body []byte, headers map[string
 		hasImg = !complete || looksLikeChatImage(head)
 	}
 	if !hasImg {
-		reqlog.Add("stress", endpoint, model, string(body), string(head), "200 但响应中没有图片", 200)
+		reqlog.Add(userID, "stress", endpoint, model, string(body), string(head), "200 但响应中没有图片", 200)
 	}
 	return true, lat, 200, "", nil
 }

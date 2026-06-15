@@ -1,85 +1,184 @@
 package httpapi
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"net/http"
-	"os"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/meihai66/stcs/internal/auth"
+	"github.com/meihai66/stcs/internal/store"
 )
 
-const cookieName = "stcs_auth"
+const cookieName = "stcs_session"
 
-// password 是进入测试页的访问密码,环境变量 STCS_PASSWORD 配置,默认 admin888。
-func password() string {
-	if v := os.Getenv("STCS_PASSWORD"); v != "" {
-		return v
-	}
-	return "admin888"
-}
-
-// expectedToken 由密码派生,作为 cookie 值;无状态校验,重启后仍有效。
-func expectedToken() string {
-	sum := sha256.Sum256([]byte(password() + "::stcs-gate-v1"))
-	return hex.EncodeToString(sum[:])
-}
-
-func tokenValid(t string) bool {
-	exp := expectedToken()
-	return subtle.ConstantTimeCompare([]byte(t), []byte(exp)) == 1
-}
-
-// isAuthed 判断请求是否已通过密码门。
-func isAuthed(r *http.Request) bool {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		return false
-	}
-	return tokenValid(c.Value)
-}
-
-// handleLogin 校验密码,通过则下发 cookie。
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Password string `json:"password"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(password())) != 1 {
-		writeErr(w, http.StatusUnauthorized, "密码错误")
-		return
-	}
+// setSessionCookie 下发会话 cookie(登录 / 改密后复用)。
+func setSessionCookie(w http.ResponseWriter, token string, exp time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
-		Value:    expectedToken(),
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(30 * 24 * time.Hour),
-		MaxAge:   30 * 24 * 3600,
+		Expires:  exp,
+		MaxAge:   int(auth.SessionTTL() / time.Second),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleLogout 清除 cookie。
+// sameOrigin 防 CSRF:写操作(非 GET)若带了 Origin,必须与本站同源。
+// 不带 Origin(curl 等非浏览器客户端)放行——CSRF 是浏览器攻击。
+func sameOrigin(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	return err == nil && u.Host == r.Host
+}
+
+// ---- 登录失败限速(按用户名,5 次失败后冷却 30 秒)----
+var (
+	loginMu    sync.Mutex
+	loginFails = map[string]*failRec{}
+)
+
+type failRec struct {
+	count int
+	until time.Time
+}
+
+func loginThrottled(key string) bool {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	r := loginFails[key]
+	return r != nil && time.Now().Before(r.until)
+}
+
+func loginFailed(key string) {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	r := loginFails[key]
+	if r == nil {
+		r = &failRec{}
+		loginFails[key] = r
+	}
+	r.count++
+	if r.count >= 5 {
+		r.until = time.Now().Add(30 * time.Second)
+		r.count = 0
+	}
+}
+
+func loginCleared(key string) {
+	loginMu.Lock()
+	delete(loginFails, key)
+	loginMu.Unlock()
+}
+
+type ctxKey int
+
+const userKey ctxKey = 0
+
+// currentUser 取出当前请求的登录用户(经 requireAuth 注入)。
+func currentUser(r *http.Request) store.User {
+	u, _ := r.Context().Value(userKey).(store.User)
+	return u
+}
+
+func isAdmin(r *http.Request) bool { return currentUser(r).Role == "admin" }
+
+// requireAuth 校验会话 cookie,注入当前用户。
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			writeErr(w, http.StatusForbidden, "跨站请求被拒绝")
+			return
+		}
+		c, err := r.Cookie(cookieName)
+		if err != nil {
+			writeErr(w, http.StatusUnauthorized, "未登录或登录已过期,请重新登录。")
+			return
+		}
+		u, ok := store.SessionUser(c.Value)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "未登录或登录已过期,请重新登录。")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
+	}
+}
+
+// requireAdmin 在 requireAuth 基础上要求管理员角色。
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if !isAdmin(r) {
+			writeErr(w, http.StatusForbidden, "需要管理员权限")
+			return
+		}
+		next(w, r)
+	})
+}
+
+// handleCaptcha 下发一个图形验证码。
+func handleCaptcha(w http.ResponseWriter, r *http.Request) {
+	id, dataURI := auth.NewCaptcha()
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "image": dataURI})
+}
+
+// handleLogin 校验验证码 + 账密,通过则建会话并下发 cookie。
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		CaptchaID string `json:"captcha_id"`
+		Captcha   string `json:"captcha"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	username := strings.TrimSpace(body.Username)
+	if loginThrottled(username) {
+		writeErr(w, http.StatusTooManyRequests, "登录失败次数过多,请 30 秒后再试。")
+		return
+	}
+	if !auth.VerifyCaptcha(body.CaptchaID, strings.TrimSpace(body.Captcha)) {
+		loginFailed(username)
+		writeErr(w, http.StatusBadRequest, "验证码错误或已过期")
+		return
+	}
+	u, hash, ok := store.GetUserByUsername(username)
+	if !ok || !auth.CheckPassword(hash, body.Password) {
+		loginFailed(username)
+		writeErr(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	loginCleared(username)
+	tok, exp := auth.CreateSession(u.ID)
+	setSessionCookie(w, tok, exp)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": u})
+}
+
+// handleLogout 删除会话并清除 cookie。
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(cookieName); err == nil {
+		store.DeleteSession(c.Value)
+	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleAuthStatus 报告是否已认证(供前端决定显示密码门还是主界面)。
+// handleAuthStatus 报告登录态与当前用户(供前端决定显示登录页还是主界面)。
 func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"authed": isAuthed(r), "required": true})
-}
-
-// requireAuth 包裹需要密码门保护的处理器。
-func requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthed(r) {
-			writeErr(w, http.StatusUnauthorized, "未登录或登录已过期,请输入访问密码。")
+	if c, err := r.Cookie(cookieName); err == nil {
+		if u, ok := store.SessionUser(c.Value); ok {
+			writeJSON(w, http.StatusOK, map[string]any{"authed": true, "required": true, "user": u})
 			return
 		}
-		next(w, r)
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"authed": false, "required": true})
 }

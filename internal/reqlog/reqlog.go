@@ -1,8 +1,8 @@
-// Package reqlog 是一个进程内的环形日志,记录「HTTP 200 但没拿到图片」的异常,
+// Package reqlog 是一个进程内日志,记录「HTTP 200 但没拿到图片」的异常,按用户区分,
 // 方便事后排查中转站为什么返回成功却不带图。只存内存,进程重启即清空。
 //
-// 列表(List)只返回不含请求体/响应体的轻量元信息,避免一次性把大量响应体传给前端;
-// 单条(Get)才返回完整的请求体/响应体(响应体不截断)。
+// 列表(List)只返回不含请求体/响应体的轻量元信息;单条(Get)才返回完整体(响应体不截断)。
+// 保存条数上限可由管理员动态调整(SetCap)。
 package reqlog
 
 import (
@@ -10,26 +10,27 @@ import (
 	"time"
 )
 
-// maxEntries 是环形缓冲容量。
-const maxEntries = 1000
-
 // Entry 是一条完整的「200 无图」记录(含请求体/响应体)。
 type Entry struct {
 	ID       int64  `json:"id"`
-	Time     int64  `json:"time"`     // unix 秒
-	Source   string `json:"source"`   // images | chat | edit | stress
-	Endpoint string `json:"endpoint"` // 实际请求的中转站地址
+	Time     int64  `json:"time"`
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username,omitempty"` // 仅管理员视角填充
+	Source   string `json:"source"`             // images | chat | edit | stress
+	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
-	Status   int    `json:"status"`   // 恒为 200(只记 200 无图)
-	Reason   string `json:"reason"`   // 判定无图的原因
-	Request  string `json:"request"`  // 请求体(完整)
-	Response string `json:"response"` // 响应体(完整,不截断)
+	Status   int    `json:"status"`
+	Reason   string `json:"reason"`
+	Request  string `json:"request"`
+	Response string `json:"response"`
 }
 
 // Meta 是列表用的轻量元信息,不含请求体/响应体。
 type Meta struct {
 	ID       int64  `json:"id"`
 	Time     int64  `json:"time"`
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username,omitempty"`
 	Source   string `json:"source"`
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
@@ -39,69 +40,93 @@ type Meta struct {
 
 var (
 	mu     sync.Mutex
-	ring   [maxEntries]Entry
-	size   int   // 有效条数(<= maxEntries)
-	head   int   // 下一个写入位置
-	nextID int64 // 自增 ID
+	buf    []Entry // 旧 → 新
+	maxN   = 1000
+	nextID int64
 )
 
-// Add 记录一次「200 但未获取到图片」事件。请求体/响应体原样保存,不截断。
-func Add(source, endpoint, model, request, response, reason string, status int) {
+// SetCap 设置最大保存条数(管理员)。
+func SetCap(n int) {
 	mu.Lock()
 	defer mu.Unlock()
-	nextID++
-	ring[head] = Entry{
-		ID:       nextID,
-		Time:     time.Now().Unix(),
-		Source:   source,
-		Endpoint: endpoint,
-		Model:    model,
-		Status:   status,
-		Reason:   reason,
-		Request:  request,
-		Response: response,
-	}
-	head = (head + 1) % maxEntries
-	if size < maxEntries {
-		size++
+	if n > 0 {
+		maxN = n
+		trim()
 	}
 }
 
-// List 返回最近的元信息,最新在前;limit<=0 表示全部。不含请求体/响应体。
-func List(limit int) []Meta {
+// Cap 返回当前上限。
+func Cap() int {
 	mu.Lock()
 	defer mu.Unlock()
-	if limit <= 0 || limit > size {
-		limit = size
+	return maxN
+}
+
+func trim() {
+	if len(buf) > maxN {
+		buf = append([]Entry(nil), buf[len(buf)-maxN:]...)
 	}
-	out := make([]Meta, 0, limit)
-	for i := 0; i < limit; i++ {
-		e := ring[(head-1-i+maxEntries)%maxEntries]
+}
+
+// Add 记录一次「200 但未获取到图片」事件。请求体/响应体原样保存,不截断。
+func Add(userID int64, source, endpoint, model, request, response, reason string, status int) {
+	mu.Lock()
+	defer mu.Unlock()
+	nextID++
+	buf = append(buf, Entry{
+		ID: nextID, Time: time.Now().Unix(), UserID: userID,
+		Source: source, Endpoint: endpoint, Model: model,
+		Status: status, Reason: reason, Request: request, Response: response,
+	})
+	trim()
+}
+
+// List 返回最近的元信息,最新在前。all=true(管理员)返回全部用户,否则只返回 userID 的。
+func List(userID int64, all bool, limit int) []Meta {
+	mu.Lock()
+	defer mu.Unlock()
+	out := []Meta{}
+	for i := len(buf) - 1; i >= 0; i-- {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		e := buf[i]
+		if !all && e.UserID != userID {
+			continue
+		}
 		out = append(out, Meta{
-			ID: e.ID, Time: e.Time, Source: e.Source, Endpoint: e.Endpoint,
-			Model: e.Model, Status: e.Status, Reason: e.Reason,
+			ID: e.ID, Time: e.Time, UserID: e.UserID, Source: e.Source,
+			Endpoint: e.Endpoint, Model: e.Model, Status: e.Status, Reason: e.Reason,
 		})
 	}
 	return out
 }
 
-// Get 按 ID 返回单条完整记录(含请求体/响应体)。第二个返回值表示是否找到。
+// Get 按 id 返回单条完整记录。第二个返回值表示是否找到。
 func Get(id int64) (Entry, bool) {
 	mu.Lock()
 	defer mu.Unlock()
-	for i := 0; i < size; i++ {
-		e := ring[(head-1-i+maxEntries)%maxEntries]
-		if e.ID == id {
-			return e, true
+	for i := len(buf) - 1; i >= 0; i-- {
+		if buf[i].ID == id {
+			return buf[i], true
 		}
 	}
 	return Entry{}, false
 }
 
-// Clear 清空全部日志。
-func Clear() {
+// Clear 清空日志。all=true 清全部;否则只清某用户的。
+func Clear(userID int64, all bool) {
 	mu.Lock()
 	defer mu.Unlock()
-	ring = [maxEntries]Entry{}
-	size, head = 0, 0
+	if all {
+		buf = nil
+		return
+	}
+	kept := make([]Entry, 0, len(buf))
+	for _, e := range buf {
+		if e.UserID != userID {
+			kept = append(kept, e)
+		}
+	}
+	buf = kept
 }

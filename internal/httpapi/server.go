@@ -27,10 +27,20 @@ const stressMaxConcurrency = 20000
 func New(staticFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
-	// ---- 认证(不走密码门)----
+	// ---- 认证(不需登录)----
+	mux.HandleFunc("GET /api/captcha", handleCaptcha)
 	mux.HandleFunc("POST /api/login", handleLogin)
 	mux.HandleFunc("POST /api/logout", handleLogout)
 	mux.HandleFunc("GET /api/auth/status", handleAuthStatus)
+
+	// ---- 用户管理 + 全局设置(仅管理员)----
+	mux.HandleFunc("GET /api/users", requireAdmin(listUsers))
+	mux.HandleFunc("POST /api/users", requireAdmin(createUser))
+	mux.HandleFunc("POST /api/users/{id}", requireAdmin(updateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", requireAdmin(deleteUser))
+	mux.HandleFunc("GET /api/settings", requireAdmin(getSettings))
+	mux.HandleFunc("POST /api/settings", requireAdmin(setSettings))
+	mux.HandleFunc("POST /api/password", requireAuth(changePassword))
 
 	// ---- Web UI 接口(密码门保护)----
 	mux.HandleFunc("GET /api/config", requireAuth(getConfig))
@@ -70,7 +80,7 @@ func New(staticFS fs.FS) http.Handler {
 	mux.HandleFunc("POST /v1/images/generations", openaiGenerations)
 
 	// ---- 静态资源 ----
-	mux.HandleFunc("GET /outputs/{name}", serveOutput) // 生成的图片(公开,供 <img> 与 API url 引用)
+	mux.HandleFunc("GET /outputs/{uid}/{name}", requireAuth(serveOutput)) // 生成的图片(需登录,按用户隔离)
 	mux.Handle("GET /", spaHandler(staticFS))
 
 	return logMiddleware(mux)
@@ -105,22 +115,26 @@ func decodeJSON(r *http.Request, v any) error {
 // ----------------------------- 配置 -----------------------------
 
 func getConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := config.Load()
+	u := currentUser(r)
+	cfg := config.LoadForUser(u.ID)
 	out := map[string]any{
-		"base_url":            cfg.BaseURL,
-		"model":               cfg.Model,
-		"reverse_model":       cfg.ReverseModel,
-		"request_format":      cfg.RequestFormat,
-		"default_size":        cfg.DefaultSize,
-		"default_quality":     cfg.DefaultQuality,
-		"timeout":             cfg.Timeout,
-		"concurrency":         cfg.Concurrency,
-		"api_key":             maskKey(cfg.APIKey),
-		"has_api_key":         cfg.APIKey != "",
-		"server_api_key":      mask4(cfg.ServerAPIKey),
-		"has_server_api_key":  cfg.ServerAPIKey != "",
-		"running_workers":     tasks.RunningWorkers(),
-		"active_profile":      cfg.ActiveProfile,
+		"base_url":           cfg.BaseURL,
+		"model":              cfg.Model,
+		"reverse_model":      cfg.ReverseModel,
+		"request_format":     cfg.RequestFormat,
+		"default_size":       cfg.DefaultSize,
+		"default_quality":    cfg.DefaultQuality,
+		"timeout":            cfg.Timeout,
+		"concurrency":        cfg.Concurrency,
+		"api_key":            maskKey(cfg.APIKey),
+		"has_api_key":        cfg.APIKey != "",
+		"server_api_key":     mask4admin(cfg.ServerAPIKey, u.Role),
+		"has_server_api_key": u.Role == "admin" && cfg.ServerAPIKey != "",
+		"running_workers":    tasks.RunningWorkers(),
+		"active_profile":     cfg.ActiveProfile,
+		"username":           u.Username,
+		"role":               u.Role,
+		"image_limit":        u.ImageLimit,
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -132,27 +146,52 @@ func mask4(s string) string {
 	return "****"
 }
 
+// mask4admin 仅向管理员暴露「对外密钥是否已设」,普通用户始终空。
+func mask4admin(s, role string) string {
+	if role != "admin" {
+		return ""
+	}
+	return mask4(s)
+}
+
 func setConfig(w http.ResponseWriter, r *http.Request) {
 	var payload map[string]any
 	if err := decodeJSON(r, &payload); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
 		return
 	}
+	u := currentUser(r)
 	updates := map[string]any{}
-	for _, k := range []string{"default_size", "default_quality", "timeout", "concurrency"} {
+	for _, k := range []string{"default_size", "default_quality", "timeout"} {
 		if v, ok := payload[k]; ok {
 			updates[k] = v
 		}
 	}
-	if v, ok := payload["server_api_key"].(string); ok && v != "" && !strings.HasPrefix(v, "****") {
-		updates["server_api_key"] = v
+	cfg := config.SaveGlobalForUser(u.ID, updates)
+	// 全局项(并发数、对外 API 密钥)仅管理员可改。
+	if u.Role == "admin" {
+		if v, ok := toIntAny(payload["concurrency"]); ok && v > 0 {
+			config.SetGlobalConcurrency(v)
+		}
+		if v, ok := payload["server_api_key"].(string); ok && v != "" && !strings.HasPrefix(v, "****") {
+			config.SetGlobalServerAPIKey(v)
+		}
 	}
-	cfg := config.SaveGlobal(updates)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": cfg.Model})
 }
 
+func toIntAny(v any) (int, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int(x), true
+	case int:
+		return x, true
+	}
+	return 0, false
+}
+
 func listProfiles(w http.ResponseWriter, r *http.Request) {
-	profs, active := config.ListProfiles()
+	profs, active := config.ListProfilesForUser(currentUser(r).ID)
 	out := make([]map[string]any, 0, len(profs))
 	for _, p := range profs {
 		out = append(out, map[string]any{
@@ -174,7 +213,7 @@ func saveProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
 		return
 	}
-	if err := config.SaveProfile(p); err != nil {
+	if err := config.SaveProfileForUser(currentUser(r).ID, p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -186,13 +225,14 @@ func activateProfile(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	_ = decodeJSON(r, &body)
-	config.SetActive(strings.TrimSpace(body.Name))
-	cfg := config.Load()
+	uid := currentUser(r).ID
+	config.SetActiveForUser(uid, strings.TrimSpace(body.Name))
+	cfg := config.LoadForUser(uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "active": cfg.ActiveProfile, "model": cfg.Model})
 }
 
 func deleteProfile(w http.ResponseWriter, r *http.Request) {
-	config.DeleteProfile(r.PathValue("name"))
+	config.DeleteProfileForUser(currentUser(r).ID, r.PathValue("name"))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -213,7 +253,8 @@ func generate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
 		return
 	}
-	cfg := config.Load()
+	uid := currentUser(r).ID
+	cfg := config.LoadForUser(uid)
 	raw := body.Prompts
 	if raw == nil {
 		raw = []string{body.Prompt}
@@ -242,7 +283,7 @@ func generate(w http.ResponseWriter, r *http.Request) {
 	var created []map[string]any
 	for _, prompt := range prompts {
 		for i := 0; i < repeat; i++ {
-			t := tasks.Enqueue(prompt, size, quality, model, fmtMode, n)
+			t := tasks.Enqueue(uid, prompt, size, quality, model, fmtMode, n)
 			created = append(created, map[string]any{"id": t.ID, "status": t.Status})
 		}
 	}
@@ -250,12 +291,22 @@ func generate(w http.ResponseWriter, r *http.Request) {
 }
 
 func listTasks(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks.List(50)})
+	u := currentUser(r)
+	all := isAdmin(r) && r.URL.Query().Get("all") == "true"
+	list := tasks.List(u.ID, all, 50)
+	if all {
+		for i := range list {
+			if usr, ok := store.GetUser(list[i].UserID); ok {
+				list[i].Username = usr.Username
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": list})
 }
 
 func getTask(w http.ResponseWriter, r *http.Request) {
 	t, ok := tasks.Get(r.PathValue("id"))
-	if !ok {
+	if !ok || (!isAdmin(r) && t.UserID != currentUser(r).ID) {
 		writeErr(w, http.StatusNotFound, "任务不存在")
 		return
 	}
@@ -264,25 +315,39 @@ func getTask(w http.ResponseWriter, r *http.Request) {
 
 // clearTasks 清理已结束(done/error)的任务,保留排队中/生成中的。
 func clearTasks(w http.ResponseWriter, r *http.Request) {
-	removed := tasks.Clear()
+	all := isAdmin(r) && r.URL.Query().Get("all") == "true"
+	removed := tasks.Clear(currentUser(r).ID, all)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }
 
-func safeOutputPath(name string) string {
+// safeOutputPath 把一个文件名安全地解析到「某用户」的图片目录内。
+func safeOutputPath(userID int64, name string) string {
 	base := filepath.Base(name)
 	if base == "" || base == "." || base == "/" {
 		return ""
 	}
-	p := filepath.Join(generator.OutputDir(), base)
+	dir := generator.UserDir(userID)
+	p := filepath.Join(dir, base)
 	abs, _ := filepath.Abs(p)
-	outAbs, _ := filepath.Abs(generator.OutputDir())
-	if !strings.HasPrefix(abs, outAbs) {
+	dirAbs, _ := filepath.Abs(dir)
+	if !strings.HasPrefix(abs, dirAbs) {
 		return ""
 	}
 	if _, err := os.Stat(p); err != nil {
 		return ""
 	}
 	return p
+}
+
+// enforceImageLimit 按用户图片上限裁掉最旧历史并删盘上文件。
+func enforceImageLimit(userID int64) {
+	u, ok := store.GetUser(userID)
+	if !ok || u.ImageLimit <= 0 {
+		return
+	}
+	for _, f := range store.PruneUserImages(userID, u.ImageLimit) {
+		_ = os.Remove(filepath.Join(generator.UserDir(userID), filepath.Base(f)))
+	}
 }
 
 func editImage(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +360,8 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "缺少 prompt")
 		return
 	}
-	cfg := config.Load()
+	u := currentUser(r)
+	cfg := config.LoadForUser(u.ID)
 	var files []generator.EditFile
 	if r.MultipartForm != nil {
 		for _, fh := range r.MultipartForm.File["images"] {
@@ -317,7 +383,7 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 		if fn == "" {
 			continue
 		}
-		if p := safeOutputPath(fn); p != "" {
+		if p := safeOutputPath(u.ID, fn); p != "" {
 			if data, err := os.ReadFile(p); err == nil {
 				files = append(files, generator.EditFile{Name: filepath.Base(p), Data: data})
 			}
@@ -333,7 +399,7 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 	quality := orStr(r.FormValue("quality"), cfg.DefaultQuality)
 
 	results, err := generator.Edit(r.Context(), prompt, files, generator.Params{
-		BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: model,
+		UserID: u.ID, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: model,
 		Size: size, Quality: quality, N: n, Timeout: cfg.Timeout,
 	})
 	if err != nil {
@@ -346,7 +412,8 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 		fileNames = append(fileNames, r.Filename)
 		imgs = append(imgs, map[string]any{"filename": r.Filename, "url": r.URL})
 	}
-	store.AddHistory("edit", prompt, model, size, quality, len(results), fileNames)
+	store.AddHistory(u.ID, "edit", prompt, model, size, quality, len(results), fileNames)
+	enforceImageLimit(u.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"images": imgs})
 }
 
@@ -354,33 +421,38 @@ func editImage(w http.ResponseWriter, r *http.Request) {
 
 func listHistory(w http.ResponseWriter, r *http.Request) {
 	limit := atoiDefault(r.URL.Query().Get("limit"), 100)
-	writeJSON(w, http.StatusOK, map[string]any{"history": store.ListHistory(limit)})
+	if isAdmin(r) && r.URL.Query().Get("all") == "true" {
+		writeJSON(w, http.StatusOK, map[string]any{"history": store.ListAllHistory(limit)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"history": store.ListHistory(currentUser(r).ID, limit)})
 }
 
 func deleteHistory(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	files := store.DeleteHistory(id)
-	if r.URL.Query().Get("with_files") == "true" {
+	files, owner := store.DeleteHistory(id, currentUser(r).ID, isAdmin(r))
+	if r.URL.Query().Get("with_files") == "true" && owner != 0 {
 		for _, f := range files {
-			_ = os.Remove(filepath.Join(generator.OutputDir(), filepath.Base(f)))
+			_ = os.Remove(filepath.Join(generator.UserDir(owner), filepath.Base(f)))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// clearHistory 清空全部历史记录;?with_files=true 时一并删除对应图片文件。
+// clearHistory 清空当前用户的历史记录;?with_files=true 时一并删除对应图片文件。
 func clearHistory(w http.ResponseWriter, r *http.Request) {
-	files := store.ClearHistory()
+	uid := currentUser(r).ID
+	files := store.ClearHistory(uid)
 	if r.URL.Query().Get("with_files") == "true" {
 		for _, f := range files {
-			_ = os.Remove(filepath.Join(generator.OutputDir(), filepath.Base(f)))
+			_ = os.Remove(filepath.Join(generator.UserDir(uid), filepath.Base(f)))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func listFavorites(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"favorites": store.ListFavorites()})
+	writeJSON(w, http.StatusOK, map[string]any{"favorites": store.ListFavorites(currentUser(r).ID)})
 }
 
 func addFavorite(w http.ResponseWriter, r *http.Request) {
@@ -393,13 +465,13 @@ func addFavorite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "提示词为空")
 		return
 	}
-	id := store.AddFavorite(strings.TrimSpace(body.Prompt), strings.TrimSpace(body.Name))
+	id := store.AddFavorite(currentUser(r).ID, strings.TrimSpace(body.Prompt), strings.TrimSpace(body.Name))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
 func deleteFavorite(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	store.DeleteFavorite(id)
+	store.DeleteFavorite(id, currentUser(r).ID, isAdmin(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -421,7 +493,7 @@ func reversePrompt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "未收到图片")
 		return
 	}
-	cfg := config.Load()
+	cfg := config.LoadForUser(currentUser(r).ID)
 	model := orStr(r.FormValue("model"), orStr(cfg.ReverseModel, "gpt-4o"))
 	text, err := generator.ReversePrompt(r.Context(), data, cfg.BaseURL, cfg.APIKey, model, cfg.Timeout)
 	if err != nil {
@@ -449,7 +521,8 @@ func stressStart(w http.ResponseWriter, r *http.Request) {
 		Save          bool   `json:"save"`
 	}
 	_ = decodeJSON(r, &body)
-	cfg := config.Load()
+	uid := currentUser(r).ID
+	cfg := config.LoadForUser(uid)
 	total := body.Total
 	if total < 1 {
 		total = 1
@@ -465,6 +538,7 @@ func stressStart(w http.ResponseWriter, r *http.Request) {
 		capped = true
 	}
 	stress.Start(stress.StartParams{
+		UserID:      uid,
 		Prompt:      orStr(body.Prompt, "a cute cat"),
 		Total:       total,
 		Concurrency: concurrency,
@@ -491,12 +565,21 @@ func stressStop(w http.ResponseWriter, r *http.Request) {
 
 // ----------------------------- 请求日志(200 无图) -----------------------------
 
-// listRequestLogs 只返回轻量元信息(不含请求体/响应体),保证列表接口不臃肿。
+// listRequestLogs 只返回轻量元信息(不含请求体/响应体)。普通用户仅看自己的;管理员加 ?all=true 看全部。
 func listRequestLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"logs": reqlog.List(0)})
+	all := isAdmin(r) && r.URL.Query().Get("all") == "true"
+	logs := reqlog.List(currentUser(r).ID, all, 0)
+	if all {
+		for i := range logs {
+			if usr, ok := store.GetUser(logs[i].UserID); ok {
+				logs[i].Username = usr.Username
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
 }
 
-// getRequestLog 按 id 返回单条完整记录(含请求体/响应体)。
+// getRequestLog 按 id 返回单条完整记录(含请求体/响应体);校验归属。
 func getRequestLog(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -504,22 +587,27 @@ func getRequestLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, ok := reqlog.Get(id)
-	if !ok {
+	if !ok || (!isAdmin(r) && e.UserID != currentUser(r).ID) {
 		writeErr(w, http.StatusNotFound, "记录不存在(可能已被新日志挤出)")
 		return
+	}
+	if usr, ok := store.GetUser(e.UserID); ok {
+		e.Username = usr.Username
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"log": e})
 }
 
 func clearRequestLogs(w http.ResponseWriter, r *http.Request) {
-	reqlog.Clear()
+	all := isAdmin(r) && r.URL.Query().Get("all") == "true"
+	reqlog.Clear(currentUser(r).ID, all)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ----------------------------- 画廊 -----------------------------
 
 func gallery(w http.ResponseWriter, r *http.Request) {
-	entries, _ := os.ReadDir(generator.OutputDir())
+	uid := currentUser(r).ID
+	entries, _ := os.ReadDir(generator.UserDir(uid))
 	var names []string
 	for _, e := range entries {
 		if strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
@@ -532,19 +620,30 @@ func gallery(w http.ResponseWriter, r *http.Request) {
 	}
 	imgs := make([]map[string]any, 0, len(names))
 	for _, n := range names {
-		imgs = append(imgs, map[string]any{"filename": n, "url": "/outputs/" + n})
+		imgs = append(imgs, map[string]any{"filename": n, "url": "/outputs/" + strconv.FormatInt(uid, 10) + "/" + n})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"images": imgs})
 }
 
 // ----------------------------- 静态资源 -----------------------------
 
+// serveOutput 提供某用户的图片;需登录,且只能访问自己的(管理员可访问任意)。
 func serveOutput(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("uid"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !isAdmin(r) && currentUser(r).ID != uid {
+		http.NotFound(w, r)
+		return
+	}
 	name := filepath.Base(r.PathValue("name"))
-	p := filepath.Join(generator.OutputDir(), name)
+	dir := generator.UserDir(uid)
+	p := filepath.Join(dir, name)
 	abs, _ := filepath.Abs(p)
-	outAbs, _ := filepath.Abs(generator.OutputDir())
-	if !strings.HasPrefix(abs, outAbs) {
+	dirAbs, _ := filepath.Abs(dir)
+	if !strings.HasPrefix(abs, dirAbs) {
 		http.NotFound(w, r)
 		return
 	}

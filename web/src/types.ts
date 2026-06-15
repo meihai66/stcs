@@ -13,6 +13,24 @@ export interface Config {
   has_server_api_key: boolean
   running_workers: number
   active_profile: string
+  username: string
+  role: string
+  image_limit: number
+}
+
+export interface User {
+  id: number
+  username: string
+  role: string
+  image_limit: number
+  created_at: number
+}
+
+export interface GlobalSettings {
+  log_limit: number
+  default_image_limit: number
+  concurrency: number
+  has_server_api_key: boolean
 }
 
 export interface Profile {
@@ -32,6 +50,8 @@ export interface ImageRef {
 
 export interface Task {
   id: string
+  user_id?: number
+  username?: string
   mode: string
   status: 'queued' | 'running' | 'done' | 'error'
   prompt: string
@@ -49,6 +69,8 @@ export interface Task {
 
 export interface HistoryItem {
   id: number
+  user_id?: number
+  username?: string
   created_at: number
   mode: string
   prompt: string
@@ -105,6 +127,8 @@ export type Mode = 'images' | 'chat' | 'edit'
 export interface RequestLogMeta {
   id: number
   time: number
+  user_id?: number
+  username?: string
   source: string
   endpoint: string
   model: string

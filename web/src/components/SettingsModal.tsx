@@ -22,7 +22,10 @@ export default function SettingsModal({ open, onClose, config, profiles, active,
   const [timeout, setTimeoutV] = useState(300)
   const [concurrency, setConcurrency] = useState(3)
   const [serverKey, setServerKey] = useState('')
+  const [oldPw, setOldPw] = useState('')
+  const [newPw, setNewPw] = useState('')
   const [status, setStatus] = useState<{ msg: string; kind: 'ok' | 'err' } | null>(null)
+  const isAdmin = config.role === 'admin'
 
   useEffect(() => {
     if (!open) return
@@ -74,15 +77,27 @@ export default function SettingsModal({ open, onClose, config, profiles, active,
         request_format: form.request_format || 'images',
       })
       await api.activateProfile(name)
-      await api.saveConfig({
-        default_quality: quality.trim(),
-        timeout: timeout || 300,
-        concurrency: Math.max(1, Math.min(concurrency || 3, 16)),
-        server_api_key: serverKey.trim(),
-      })
+      const cfgBody: Record<string, unknown> = { default_quality: quality.trim(), timeout: timeout || 300 }
+      if (isAdmin) {
+        cfgBody.concurrency = Math.max(1, Math.min(concurrency || 3, 16))
+        if (serverKey.trim()) cfgBody.server_api_key = serverKey.trim()
+      }
+      await api.saveConfig(cfgBody)
       setStatus({ msg: '已保存 ✓ 当前配置:' + name, kind: 'ok' })
       onSaved()
       setTimeout(onClose, 600)
+    } catch (e) {
+      setStatus({ msg: (e as Error).message, kind: 'err' })
+    }
+  }
+
+  async function changePwd() {
+    if (!newPw.trim()) return setStatus({ msg: '请填写新密码', kind: 'err' })
+    try {
+      await api.changePassword(oldPw, newPw)
+      setOldPw('')
+      setNewPw('')
+      setStatus({ msg: '密码已修改 ✓', kind: 'ok' })
     } catch (e) {
       setStatus({ msg: (e as Error).message, kind: 'err' })
     }
@@ -158,9 +173,9 @@ export default function SettingsModal({ open, onClose, config, profiles, active,
       </select>
 
       <div className="mt-6 mb-3 sec-title">
-        全局设置(所有配置共用)<span className="ln" />
+        我的默认值<span className="ln" />
       </div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className={`grid gap-3 ${isAdmin ? 'grid-cols-3' : 'grid-cols-2'}`}>
         <div>
           <label className="lbl !mt-0">默认质量</label>
           <input className="field" value={quality} onChange={(e) => setQuality(e.target.value)} />
@@ -169,21 +184,35 @@ export default function SettingsModal({ open, onClose, config, profiles, active,
           <label className="lbl !mt-0">超时(秒)</label>
           <input className="field" type="number" value={timeout} onChange={(e) => setTimeoutV(+e.target.value)} />
         </div>
-        <div>
-          <label className="lbl !mt-0">队列并发数</label>
-          <input className="field" type="number" min={1} max={16} value={concurrency} onChange={(e) => setConcurrency(+e.target.value)} />
-        </div>
+        {isAdmin && (
+          <div>
+            <label className="lbl !mt-0">队列并发数</label>
+            <input className="field" type="number" min={1} max={16} value={concurrency} onChange={(e) => setConcurrency(+e.target.value)} />
+          </div>
+        )}
       </div>
-      <p className="mt-2 text-[11px] text-slate-500">当前运行 {config.running_workers} 个 worker。改并发数后需重启服务生效。</p>
+      {isAdmin && (
+        <>
+          <p className="mt-2 text-[11px] text-slate-500">当前运行 {config.running_workers} 个 worker。改并发数后需重启服务生效。</p>
+          <label className="lbl">对外 API 密钥(全局,可选)</label>
+          <input
+            className="field"
+            type="password"
+            value={serverKey}
+            onChange={(e) => setServerKey(e.target.value)}
+            placeholder={config.has_server_api_key ? '已设置(留空=不修改)' : '留空=不校验'}
+          />
+        </>
+      )}
 
-      <label className="lbl">对外 API 密钥(可选)</label>
-      <input
-        className="field"
-        type="password"
-        value={serverKey}
-        onChange={(e) => setServerKey(e.target.value)}
-        placeholder={config.has_server_api_key ? '已设置(留空=不修改)' : '留空=不校验'}
-      />
+      <div className="mt-6 mb-3 sec-title">
+        修改密码<span className="ln" />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <input className="field" type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} placeholder="原密码" />
+        <input className="field" type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="新密码" />
+      </div>
+      <button className="btn btn-ghost mt-2 w-full" onClick={changePwd}>修改密码</button>
     </Modal>
   )
 }

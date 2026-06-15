@@ -7,6 +7,7 @@ import Modal from './Modal'
 interface Props {
   open: boolean
   onClose: () => void
+  isAdmin?: boolean
 }
 
 const SOURCE_LABEL: Record<string, { text: string; cls: string }> = {
@@ -32,11 +33,12 @@ function fmtTime(sec: number): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-export default function RequestLogsModal({ open, onClose }: Props) {
+export default function RequestLogsModal({ open, onClose, isAdmin }: Props) {
   const [logs, setLogs] = useState<RequestLogMeta[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
   const [filter, setFilter] = useState('')
+  const [viewAll, setViewAll] = useState(false)
   // 展开的那一条 + 单条详情缓存(含请求体/响应体),点开才按 id 拉取
   const [openId, setOpenId] = useState<number | null>(null)
   const [detail, setDetail] = useState<Record<number, RequestLog>>({})
@@ -47,7 +49,7 @@ export default function RequestLogsModal({ open, onClose }: Props) {
     setLoading(true)
     setErr('')
     try {
-      setLogs((await api.requestLogs()).logs || [])
+      setLogs((await api.requestLogs(isAdmin && viewAll)).logs || [])
       setDetail({})
       setDetailErr({})
       setOpenId(null)
@@ -56,7 +58,7 @@ export default function RequestLogsModal({ open, onClose }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [isAdmin, viewAll])
 
   useEffect(() => {
     if (open) load()
@@ -82,8 +84,8 @@ export default function RequestLogsModal({ open, onClose }: Props) {
   }
 
   async function clear() {
-    if (!window.confirm('确定清空全部请求日志?')) return
-    await api.clearRequestLogs()
+    if (!window.confirm('确定清空请求日志?')) return
+    await api.clearRequestLogs(isAdmin && viewAll)
     load()
   }
 
@@ -106,6 +108,14 @@ export default function RequestLogsModal({ open, onClose }: Props) {
           <option value="stress">压测</option>
         </select>
         <span className="text-xs text-slate-500">共 {list.length} 条</span>
+        {isAdmin && (
+          <button
+            className={`btn btn-ghost !py-1.5 text-xs ${viewAll ? '!border-brand-500 !text-brand-400' : ''}`}
+            onClick={() => setViewAll((v) => !v)}
+          >
+            {viewAll ? '全部用户' : '仅我'}
+          </button>
+        )}
         <div className="ml-auto flex gap-2">
           <button className="btn btn-ghost !py-1.5 text-xs" onClick={load}>
             <RefreshCw size={13} /> 刷新
@@ -139,6 +149,9 @@ export default function RequestLogsModal({ open, onClose }: Props) {
                   <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
                     {l.status}
                   </span>
+                  {l.username && (
+                    <span className="shrink-0 rounded bg-brand-500/20 px-1.5 py-0.5 text-[10px] text-brand-400">{l.username}</span>
+                  )}
                   <span className="truncate text-[13px] text-slate-300">{l.reason}</span>
                   <span className="ml-auto shrink-0 truncate text-[11px] text-slate-500">{l.model}</span>
                 </button>
