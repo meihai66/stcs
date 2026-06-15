@@ -44,7 +44,9 @@ export default function Sidebar(p: Props) {
 
   const modelList = MODEL_PRESETS.includes(model) || !model ? MODEL_PRESETS : [model, ...MODEL_PRESETS]
   const realModel = model === '__custom' ? customModel.trim() || 'gpt-image-2' : model
-  const prompts = p.prompt.split('\n').map((s) => s.trim()).filter(Boolean)
+  // 整段输入作为一条提示词,不按行拆分(段内换行原样保留)
+  const trimmed = p.prompt.trim()
+  const prompts = trimmed ? [trimmed] : []
 
   function say(msg: string, kind: 'ok' | 'err' | 'info') {
     setStatus({ msg, kind })
@@ -75,7 +77,7 @@ export default function Sidebar(p: Props) {
   }
 
   async function generate() {
-    if (!prompts.length) return say('请输入提示词(每行一条)', 'err')
+    if (!prompts.length) return say('请输入提示词', 'err')
     setBusy(true)
     try {
       if (p.mode === 'edit') {
@@ -212,7 +214,7 @@ export default function Sidebar(p: Props) {
       {/* 提示词 */}
       <div className="mt-4 flex items-center justify-between">
         <label className="text-xs font-medium text-slate-400">
-          提示词 Prompt<span className="ml-1 text-slate-600">每行一条,并行生成</span>
+          提示词 Prompt<span className="ml-1 text-slate-600">整段作为一条</span>
         </label>
         <div className="flex gap-1.5">
           <input ref={revRef} type="file" accept="image/*" className="hidden" onChange={doReverse} />
@@ -227,10 +229,10 @@ export default function Sidebar(p: Props) {
       <textarea
         value={p.prompt}
         onChange={(e) => p.setPrompt(e.target.value)}
-        placeholder={'每行一条提示词,各自作为独立任务并行生成。\n点「反推」可上传一张图自动生成提示词。'}
+        placeholder={'输入提示词,整段作为一条任务(换行不拆分)。\n点「反推」可上传一张图自动生成提示词。'}
         className="field mt-1.5 min-h-[108px] resize-y leading-relaxed"
       />
-      <div className="mt-1.5 text-xs text-slate-500">共 {prompts.length} 条提示词</div>
+      <div className="mt-1.5 text-xs text-slate-500">{repeat > 1 ? `将生成 ${repeat} 次` : ' '}</div>
 
       {/* 尺寸 */}
       <div className="mt-1">
