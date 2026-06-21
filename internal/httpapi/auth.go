@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -28,19 +27,10 @@ func setSessionCookie(w http.ResponseWriter, token string, exp time.Time) {
 	})
 }
 
-// sameOrigin 防 CSRF:写操作(非 GET)若带了 Origin,必须与本站同源。
-// 不带 Origin(curl 等非浏览器客户端)放行——CSRF 是浏览器攻击。
+// sameOrigin 已按需求放宽:允许跨站请求(自托管内网工具,需从其他来源/页面调用接口)。
+// 始终放行,不再校验 Origin 与本站是否同源。
 func sameOrigin(r *http.Request) bool {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return true
-	}
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return true
-	}
-	u, err := url.Parse(o)
-	return err == nil && u.Host == r.Host
+	return true
 }
 
 // ---- 登录失败限速(按用户名,5 次失败后冷却 30 秒)----

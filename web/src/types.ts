@@ -123,6 +123,85 @@ export interface StressStatus {
 
 export type Mode = 'images' | 'chat' | 'edit'
 
+// ---- 画质 / 超分检测 ----
+export interface InspectFinding {
+  level: 'info' | 'warn' | 'bad'
+  text: string
+}
+export interface InspectChannel {
+  cutoff: number | null
+  eff_px: number | null
+  noise: number | null
+}
+export interface InspectSpectrum {
+  centers: number[]
+  whitened: number[]
+  cutoff: number
+}
+export interface InspectClaim {
+  claim: string
+  pixel_ok: boolean
+  eff_ok: boolean
+  real: boolean
+}
+export interface InspectResult {
+  file: string
+  format: string
+  width: number
+  height: number
+  filesize: number
+  megapixels: number
+  tier: string
+  aspect: number
+  preset: string
+  preset_desc: string
+  auto_note: string
+  verdict: 'OK' | 'WARN' | 'FAIL'
+  verdict_text: string
+  verdict_color: string
+  effective_resolution_px: number | null
+  is_native: boolean | null
+  ai_super_resolution_suspect: boolean
+  interpolation: string
+  effective: {
+    cutoff: number
+    upscale_factor: number
+    upscale_factor_rounded: number
+    hf_ratio: number
+    plateau: number
+    tail_drop_db: number
+  } | null
+  spectrum: InspectSpectrum | null
+  channels: Record<'R' | 'G' | 'B', InspectChannel>
+  chroma: {
+    luma_cutoff: number | null
+    chroma_cutoff: number | null
+    chroma_luma_ratio: number | null
+    subsample: string
+  }
+  chromatic_aberration: { shift_x: number; shift_y: number; magnitude: number; present: boolean }
+  nearest_neighbor: { equal_fraction: number; is_nn: boolean; factor: number | null; block_consistency: number }
+  noise_sigma: number | null
+  sharpen: { overshoot_ratio: number; sharpened: boolean }
+  metadata: {
+    camera: string
+    software: string
+    software_hits: string[]
+    datetime: string
+    jpeg_quality: number | null
+  }
+  processing_chain: string[]
+  reasons: string[]
+  claim_check: InspectClaim | null
+  findings: InspectFinding[]
+}
+export interface InspectItem {
+  name: string
+  ok: boolean
+  error?: string
+  result?: InspectResult
+}
+
 // 列表用:不含请求体/响应体
 export interface RequestLogMeta {
   id: number

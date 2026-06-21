@@ -3,6 +3,7 @@ import type {
   Favorite,
   GlobalSettings,
   HistoryItem,
+  InspectItem,
   MarketItem,
   Profile,
   RequestLog,
@@ -73,6 +74,10 @@ export const api = {
     req<{ ok: boolean; removed: number }>(`/api/tasks${all ? '?all=true' : ''}`, { method: 'DELETE' }),
   reversePrompt: (form: FormData) =>
     req<{ prompt: string }>('/api/reverse-prompt', { method: 'POST', body: form }),
+
+  // ---- 画质 / 超分检测 ----
+  inspect: (form: FormData) =>
+    req<{ results: InspectItem[] }>('/api/inspect', { method: 'POST', body: form }),
 
   // ---- 历史 / 收藏 ----
   listHistory: (all = false, page = 1, pageSize = 12) =>

@@ -1,6 +1,7 @@
 .git
 .gitignore
 GPT和Gemini生图带压测/
+GPT生图画质超分检测/
 web/node_modules
 web/dist
 data

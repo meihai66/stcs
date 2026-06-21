@@ -63,6 +63,8 @@ func New(staticFS fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/favorites", requireAuth(addFavorite))
 	mux.HandleFunc("DELETE /api/favorites/{id}", requireAuth(deleteFavorite))
 
+	mux.HandleFunc("POST /api/inspect", requireAuth(handleInspect))
+
 	mux.HandleFunc("POST /api/reverse-prompt", requireAuth(reversePrompt))
 	mux.HandleFunc("GET /api/prompt-market", requireAuth(promptMarket))
 	mux.HandleFunc("GET /api/gallery", requireAuth(gallery))

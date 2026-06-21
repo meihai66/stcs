@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, LogOut, Moon, ScrollText, Settings, ShoppingBag, Sparkles, Star, Sun, Users, Zap } from 'lucide-react'
+import { Download, LogOut, Moon, ScanSearch, ScrollText, Settings, ShoppingBag, Sparkles, Star, Sun, Users, Zap } from 'lucide-react'
 import { api } from './api'
 import type { Config, HistoryItem, Mode, Profile, Task } from './types'
 import LoginGate from './components/LoginGate'
@@ -11,6 +11,7 @@ import MarketModal from './components/MarketModal'
 import StressModal from './components/StressModal'
 import RequestLogsModal from './components/RequestLogsModal'
 import UsersModal from './components/UsersModal'
+import InspectModal from './components/InspectModal'
 
 const HISTORY_PAGE_SIZE = 12
 
@@ -30,7 +31,7 @@ export default function App() {
   const [editSources, setEditSources] = useState<string[]>([])
 
   const [lightbox, setLightbox] = useState<string | null>(null)
-  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress' | 'logs' | 'users'>('')
+  const [modal, setModal] = useState<'' | 'settings' | 'favorites' | 'market' | 'stress' | 'logs' | 'users' | 'inspect'>('')
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('stcs-theme') === 'light' ? 'light' : 'dark'),
   )
@@ -204,6 +205,9 @@ export default function App() {
           <button className="btn btn-ghost" onClick={() => setModal('stress')}>
             <Zap size={15} /> 压测
           </button>
+          <button className="btn btn-ghost" onClick={() => setModal('inspect')} title="检测图片是否真高清/被放大/超分">
+            <ScanSearch size={15} /> 检测
+          </button>
           <button className="btn btn-ghost" onClick={() => setModal('logs')} title="查看 200 无图的请求日志">
             <ScrollText size={15} /> 日志
           </button>
@@ -287,6 +291,7 @@ export default function App() {
       />
       <RequestLogsModal open={modal === 'logs'} onClose={() => setModal('')} isAdmin={!!isAdmin} />
       <UsersModal open={modal === 'users'} onClose={() => setModal('')} />
+      <InspectModal open={modal === 'inspect'} onClose={() => setModal('')} />
 
       {/* 灯箱 */}
       {lightbox && (
